@@ -1,0 +1,3 @@
+verify/*.plugin.js
+node_modules/.cache/
+*.zip
