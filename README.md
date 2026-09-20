@@ -48,17 +48,15 @@ A brand-new plugin folder is not always noticed by a running app. If a chip
 does not appear, run **Reload desktop plugins** from the command palette (⌘K /
 Ctrl+K). Editing a file inside an already-loaded plugin hot-reloads in seconds.
 
-### The two lines you may need to edit
+### No manual path edits needed
 
-Only if you skipped `install.sh` and your gateway home is not the shipped
-default:
-
-- `desktop-plugins/session-usage/plugin.js` → `PRICE_CMD`
-- `desktop-plugins/opencode-usage/plugin.js` → `SCRIPT_CMD`
-
-Both are `python3 <gateway-home>/scripts/<script>.py`. The literal path shipped
-in the files is the stock Ubuntu cloud gateway home; `install.sh` replaces it
-with yours unconditionally.
+`install.sh` replaces the script directory token in the plugins with your
+gateway's scripts path, so after running it there is nothing to edit. The
+interpreter itself is detected at runtime: the plugin tries `python3`, then
+`python`, then `py -3`, and caches the first one that works. That makes a
+Windows-hosted gateway work even though `python3` there is usually the dead
+Microsoft Store alias: the plugin falls back to the real `python` or `py -3`
+automatically.
 
 ## How the pricing estimate works
 
@@ -99,6 +97,9 @@ to the current clock, so nothing goes stale and no account data is involved.
 ```bash
 cd verify
 PLUGIN_SRC=../desktop-plugins node harness.mjs
+
+# On Windows (PowerShell):
+$env:PLUGIN_SRC='../desktop-plugins'; node harness.mjs
 ```
 
 It also sweeps all 192 hours of an 8-day window against an independently

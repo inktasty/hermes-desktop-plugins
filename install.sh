@@ -7,16 +7,34 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-HERMES_HOME=${HERMES_HOME:-$HOME/.hermes}
+# Gateway home defaults per OS. The app can be on Windows while the gateway is
+# on Linux; HERMES_HOME is always the gateway's home, never the app's.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*) DEFAULT_HERMES_HOME="${LOCALAPPDATA:-$HOME/AppData/Local}/hermes" ;;
+  *) DEFAULT_HERMES_HOME="$HOME/.hermes" ;;
+esac
+HERMES_HOME=${HERMES_HOME:-$DEFAULT_HERMES_HOME}
 PLUGIN_IDS="deepseek-rate opencode-usage session-usage"
-# Shipped default inside the plugins; always rewritten to $HERMES_HOME below.
-SHIPPED_HOME="/home/ubuntu/.hermes"
+# Shipped placeholder inside the plugins; replaced with this gateway's scripts path.
+SCRIPTS_TOKEN="__HERMES_SCRIPTS__"
 
 case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN*) DEFAULT_DEST="${LOCALAPPDATA:-$HOME/AppData/Local}/hermes/desktop-plugins" ;;
   *) DEFAULT_DEST="$HERMES_HOME/desktop-plugins" ;;
 esac
 DEST=${1:-$DEFAULT_DEST}
+
+# Normalise scripts path to forward slashes, even on Windows, because the
+# plugins execute through the gateway shell where /c/... style paths work.
+SCRIPTS_PATH="$HERMES_HOME/scripts"
+# Convert a Windows-style HERMES_HOME (C:\...) to MinGW /c/... if possible.
+if command -v cygpath >/dev/null 2>&1; then
+  SCRIPTS_PATH=$(cygpath -u "$SCRIPTS_PATH")
+elif [[ "$SCRIPTS_PATH" =~ ^[A-Za-z]:\\\\ ]]; then
+  drive=${SCRIPTS_PATH:0:1}
+  rest=${SCRIPTS_PATH:3}
+  SCRIPTS_PATH="/${drive,,}/${rest//\\//}"
+fi
 
 mkdir -p "$DEST"
 for id in $PLUGIN_IDS; do
@@ -25,21 +43,20 @@ for id in $PLUGIN_IDS; do
   echo "installed $id -> $DEST/$id/plugin.js"
 done
 
-# Point the plugins at THIS gateway's scripts. Only the one command line per
-# plugin is touched; nothing else in the file changes.
+# Point the plugins at THIS gateway's scripts. Only the SCRIPTS_DIR line is
+# touched; nothing else in the file changes.
 for id in session-usage opencode-usage; do
   if command -v perl >/dev/null 2>&1; then
-    perl -pi -e "s#\Q$SHIPPED_HOME\E/scripts/#$HERMES_HOME/scripts/#g" "$DEST/$id/plugin.js"
+    perl -pi -e "s#\Q$SCRIPTS_TOKEN\E#$SCRIPTS_PATH#g" "$DEST/$id/plugin.js"
     echo "rewrote script paths in $id for HERMES_HOME=$HERMES_HOME"
   elif sed --version >/dev/null 2>&1; then
-    OLD=$(printf '%s' "$SHIPPED_HOME" | sed 's/[\/&]/\\&/g')
-    NEW=$(printf '%s' "$HERMES_HOME" | sed 's/[\/&]/\\&/g')
-    sed -i "s#$OLD/scripts/#$NEW/scripts/#g" "$DEST/$id/plugin.js"
+    NEW=$(printf '%s' "$SCRIPTS_PATH" | sed 's/[\/&]/\\&/g')
+    sed -i "s#$SCRIPTS_TOKEN#$NEW#g" "$DEST/$id/plugin.js"
     echo "rewrote script paths in $id for HERMES_HOME=$HERMES_HOME"
   else
     echo "WARNING: no perl or GNU sed here."
-    echo "Edit the PRICE_CMD / SCRIPT_CMD line by hand in $DEST/$id/plugin.js"
-    echo "so it points at $HERMES_HOME/scripts/"
+    echo "Edit the SCRIPTS_DIR line by hand in $DEST/$id/plugin.js"
+    echo "so it points at $SCRIPTS_PATH"
   fi
 done
 

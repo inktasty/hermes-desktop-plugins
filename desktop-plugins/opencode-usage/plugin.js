@@ -43,9 +43,10 @@ const ID = 'opencode-usage'
 const ROUTE = '/opencode-go'
 const POLL_MS = 60000
 const TICK_MS = 1000
-// `install.sh` rewrites this line. It ships with the stock Ubuntu cloud gateway
-// home as the default; change it if your gateway's HERMES_HOME differs.
-const SCRIPT_CMD = 'python3 /home/ubuntu/.hermes/scripts/opencode_go_usage.py'
+// `install.sh` sets the SCRIPTS_DIR constant below to this gateway's scripts path.
+const SCRIPT_NAME = 'opencode_go_usage.py'
+const SCRIPTS_DIR = '__HERMES_SCRIPTS__'
+const PY_CANDIDATES = ['python3', 'python', 'py -3']
 const CONSOLE_URL = 'https://opencode.ai/workspace'
 const WINDOW_ORDER = ['rolling', 'weekly', 'monthly']
 
@@ -480,23 +481,39 @@ export default {
   id: ID, // must match the folder name
   name: 'OpenCode Go Usage',
   register(ctx) {
+    async function runUsageScript() {
+      if (SCRIPTS_DIR.startsWith('__HERMES')) {
+        throw new Error('run install.sh on the gateway')
+      }
+      const cached = ctx.storage && typeof ctx.storage.get === 'function' ? ctx.storage.get('py_cmd') : null
+      const candidates = cached && typeof cached === 'string' ? [cached] : PY_CANDIDATES
+      let lastCode = null
+      const scriptPath = SCRIPTS_DIR + '/' + SCRIPT_NAME
+      for (const py of candidates) {
+        try {
+          const resp = await host.request('shell.exec', { command: py + ' ' + scriptPath })
+          const stdout = resp && resp.stdout ? String(resp.stdout) : ''
+          const code = resp && typeof resp.code === 'number' ? resp.code : 0
+          lastCode = code
+          const snap = parseSnapshot(stdout)
+          if (code === 0 && snap) {
+            if (ctx.storage && typeof ctx.storage.set === 'function' && py !== cached) {
+              ctx.storage.set('py_cmd', py)
+            }
+            return snap
+          }
+        } catch (e) {
+          // fall through to next candidate
+        }
+      }
+      const tried = (cached ? [cached] : PY_CANDIDATES).join(', ')
+      throw new Error('no working python on the gateway shell (tried ' + tried + ')' + (lastCode != null ? '; exit ' + lastCode : '') + '; run install.sh on the gateway')
+    }
+
     refresh = async () => {
       $loading.set(true)
       try {
-        const resp = await host.request('shell.exec', { command: SCRIPT_CMD })
-        const stdout = resp && resp.stdout ? String(resp.stdout) : ''
-        const stderr = resp && resp.stderr ? String(resp.stderr).trim() : ''
-        const code = resp && typeof resp.code === 'number' ? resp.code : 0
-        const snap = parseSnapshot(stdout)
-
-        if (!snap) {
-          $error.set(
-            'Could not read usage from the gateway' +
-            (code ? ' (exit ' + code + ')' : '') +
-            (stderr ? ': ' + stderr.split('\n').slice(-2).join(' ') : '')
-          )
-          return
-        }
+        const snap = await runUsageScript()
         if (snap.ok === false) {
           $error.set(String(snap.error || 'usage endpoint returned no data'))
           return
