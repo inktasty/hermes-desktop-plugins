@@ -210,7 +210,7 @@ function Row({ label, value, strong }) {
   })
 }
 
-function SessionPanel({ u, est }) {
+function SessionPanel({ u, est, error }) {
   const billed = Number.isFinite(u.dev_credits_spent_micros)
   const kids = [
     jsx('div', {
@@ -246,6 +246,9 @@ function SessionPanel({ u, est }) {
   if (Number.isFinite(u.compressions) && u.compressions > 0) kids.push(jsx(Row, { key: 'comp', label: 'Compressions', value: String(u.compressions) }))
   if (Number.isFinite(u.active_subagents)) kids.push(jsx(Row, { key: 'subs', label: 'Active subagents', value: String(u.active_subagents) }))
 
+  if (error) {
+    kids.push(jsx('div', { key: 'pyerr', className: 'pt-0.5 text-[10px] text-(--ui-red)', children: error }))
+  }
   if (billed) {
     kids.push(costNote('key-billed', 'Billed spend reported by the provider'))
   } else if (est) {
@@ -270,6 +273,7 @@ export default {
     const sessData = atom({})   // merged usage map: { [sid]: usage }
     const fetchedAt = atom({})  // fetched time map: { [sid]: time }
     const ratesData = atom(null) // { input, output, cache_read, provider, model } from the gateway
+    const ratesError = atom(null) // last script-run diagnostic, visible in the panel
     const costData = atom({})   // { [sid]: { usd, peak, provider, model, ... } } estimated spend
     let ratesFor = null         // model id the cached rates belong to
 
@@ -311,8 +315,11 @@ export default {
         const parsed = await runPriceScript(want ? JSON.stringify(want) : '')
         ratesFor = parsed ? want : null
         ratesData.set(parsed)
+        ratesError.set(null)
       } catch (e) {
+        ratesFor = null
         ratesData.set(null)
+        ratesError.set(e && e.message ? e.message : String(e))
       }
     }
 
@@ -361,6 +368,7 @@ export default {
       const sessMap = useValue(sessData)
       const timesMap = useValue(fetchedAt)
       const rates = useValue(ratesData)
+      const ratesErr = useValue(ratesError)
       const costs = useValue(costData)
       const focusValue = useValue(FOCUS_ATOM)
       const sid = focusValue || ACTIVE_ATOM.get()
@@ -422,7 +430,7 @@ export default {
             sideOffset: 6,
             className: 'pointer-events-none w-64 select-none',
             children: hasSess
-              ? jsx(SessionPanel, { u, est })
+              ? jsx(SessionPanel, { u, est, error: ratesErr })
               : jsx('div', { className: 'space-y-1.5' }, [
                   jsx('div', { className: 'font-semibold text-foreground', children: 'This session' }),
                   jsx('div', { className: 'text-[11px] text-(--ui-text-tertiary)', children: 'No turns yet in this session' })

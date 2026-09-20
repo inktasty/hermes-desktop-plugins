@@ -25,16 +25,20 @@ esac
 DEST=${1:-$DEFAULT_DEST}
 
 # Normalise scripts path to forward slashes, even on Windows, because the
-# plugins execute through the gateway shell where /c/... style paths work.
+# plugins execute through the gateway shell where C:/... style paths work.
 SCRIPTS_PATH="$HERMES_HOME/scripts"
-# Convert a Windows-style HERMES_HOME (C:\...) to MinGW /c/... if possible.
+# Convert any Windows/MSYS path to a drive-letter forward-slash form that both
+# cmd.exe and Windows Python accept (C:/Users/... rather than /c/Users/...).
 if command -v cygpath >/dev/null 2>&1; then
-  SCRIPTS_PATH=$(cygpath -u "$SCRIPTS_PATH")
+  SCRIPTS_PATH=$(cygpath -m "$SCRIPTS_PATH")
 elif [[ "$SCRIPTS_PATH" =~ ^[A-Za-z]:\\\\ ]]; then
   drive=${SCRIPTS_PATH:0:1}
   rest=${SCRIPTS_PATH:3}
-  SCRIPTS_PATH="/${drive,,}/${rest//\\//}"
+  SCRIPTS_PATH="${drive^^}:/${rest//\\//}"
 fi
+# Ensure forward slashes everywhere; the final separator between HERMES_HOME and
+# scripts is already '/', but a Windows HERMES_HOME may contain '\'.
+SCRIPTS_PATH="${SCRIPTS_PATH//\\//}"
 
 mkdir -p "$DEST"
 for id in $PLUGIN_IDS; do
@@ -47,7 +51,9 @@ done
 # touched; nothing else in the file changes.
 for id in session-usage opencode-usage; do
   if command -v perl >/dev/null 2>&1; then
-    perl -pi -e "s#\Q$SCRIPTS_TOKEN\E#$SCRIPTS_PATH#g" "$DEST/$id/plugin.js"
+    # Pass the path through the environment so perl does not interpret \U, \t,
+    # \A, \L etc. inside a Windows path as replacement-string escapes.
+    HDP_SCRIPTS_PATH="$SCRIPTS_PATH" perl -pi -e 's#\Q__HERMES_SCRIPTS__\E#$ENV{HDP_SCRIPTS_PATH}#g' "$DEST/$id/plugin.js"
     echo "rewrote script paths in $id for HERMES_HOME=$HERMES_HOME"
   elif sed --version >/dev/null 2>&1; then
     NEW=$(printf '%s' "$SCRIPTS_PATH" | sed 's/[\/&]/\\&/g')
