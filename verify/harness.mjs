@@ -3,10 +3,11 @@
 // independently written peak-tier oracle.
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import * as sdk from '@hermes/plugin-sdk'
 
-const HERE = path.dirname(new URL(import.meta.url).pathname)
+const HERE = path.dirname(fileURLToPath(import.meta.url))
 const CANON = process.env.PLUGIN_SRC || path.join(HERE, '..', 'desktop-plugins')
 
 let fails = 0
@@ -135,16 +136,21 @@ function restoreTimers() {
   Date.now = realNow
 }
 
-async function loadPlugin(id, { fresh = 0 } = {}) {
+async function loadPlugin(id, { fresh = 0, scriptsDir = null } = {}) {
   const src = path.join(CANON, id, 'plugin.js')
   const copy = path.join(HERE, id + '.plugin.js')
-  fs.copyFileSync(src, copy)
-  const localHash = sha(copy)
-  const canonHash = sha(src)
-  const source = fs.readFileSync(copy, 'utf8')
+  const copyFresh = fresh ? path.join(HERE, id + '.plugin.' + fresh + '.js') : copy
+  fs.copyFileSync(src, copyFresh)
+  let source = fs.readFileSync(copyFresh, 'utf8')
   const bad = unsupportedImports(source, ['@hermes/plugin-sdk', 'react', 'react/jsx-runtime'])
-  const mod = await import('./' + id + '.plugin.js' + (fresh ? '?v=' + fresh : ''))
-  return { bad, canonHash, localHash, mod: mod.default, source }
+  if (scriptsDir) {
+    source = source.replace(/__HERMES_SCRIPTS__/g, scriptsDir)
+    fs.writeFileSync(copyFresh, source)
+  }
+  const localHash = sha(copyFresh)
+  const canonHash = sha(src)
+  const mod = await import('./' + id + '.plugin' + (fresh ? '.' + fresh : '') + '.js')
+  return { bad, canonHash, localHash, mod: mod.default, source, installed: Boolean(scriptsDir) }
 }
 
 // ---- independent peak oracle -----------------------------------------------
@@ -320,10 +326,9 @@ async function testDeepseekRate() {
 // ============================================================ session-usage ==
 async function testSessionUsage() {
   console.log('--- session-usage')
-  const { bad, canonHash, localHash, mod } = await loadPlugin('session-usage')
+  const { bad, canonHash, localHash } = await loadPlugin('session-usage')
   check('import scan clean', bad.length === 0, JSON.stringify(bad))
   check('copy byte-identical to canonical', canonHash === localHash)
-  check('id matches folder', mod.id === 'session-usage', mod.id)
 
   const USAGE = {
     model: 'deepseek-v4.1-flash',
@@ -338,7 +343,14 @@ async function testSessionUsage() {
     context_max: 100000
   }
   const priceLine = JSON.stringify({ ok: true, provider: 'opencode-go', model: 'deepseek-v4.1-flash', input: 0.15, output: 0.6, cache_read: 0.003 })
-  sdk.setRpc(async method => {
+
+  // Functional tests run against an installed copy so the SCRIPTS_DIR token is
+  // resolved the same way install.sh resolves it.
+  const { mod } = await loadPlugin('session-usage', { fresh: 1, scriptsDir: '/tmp/hdp-test/scripts' })
+  check('id matches folder', mod.id === 'session-usage', mod.id)
+
+  // Baseline case with default Linux-style python3 success
+  sdk.setRpc(async (method, params) => {
     if (method === 'session.usage') return USAGE
     if (method === 'shell.exec') return { stdout: priceLine + '\n', stderr: '', code: 0 }
     return {}
@@ -395,18 +407,54 @@ async function testSessionUsage() {
   check('survives a build without focusedSessionId/activeSessionId', !legacy.err, legacy.err && legacy.err.message)
   sdk.host.state.focusedSessionId = saved.f
   sdk.host.state.activeSessionId = saved.a
+
+  // Windows-hosted gateway: python3 is the dead Microsoft Store alias (exit 49),
+  // but `python` is the real interpreter. The plugin must fall back and cache it.
+  const winMod = (await loadPlugin('session-usage', { fresh: 2, scriptsDir: '/tmp/hdp-test/scripts' })).mod
+  const stored = { py_cmd: null }
+  const { ctx: winCtx, contributions: winContributions } = captureCtx()
+  winCtx.storage = {
+    get: k => (k === 'py_cmd' ? stored.py_cmd : undefined),
+    set: (k, v) => { if (k === 'py_cmd') stored.py_cmd = v }
+  }
+  sdk.setRpc(async (method, params) => {
+    if (method === 'session.usage') return USAGE
+    if (method === 'shell.exec') {
+      const cmd = String(params && params.command || '')
+      if (cmd.startsWith('python3 ')) return { stdout: '', stderr: 'Python was not found; run install.sh on the gateway', code: 49 }
+      if (cmd.startsWith('python ')) return { stdout: priceLine + '\n', stderr: '', code: 0 }
+      return { stdout: '', stderr: 'bad candidate', code: 1 }
+    }
+    return {}
+  })
+  stubTimers()
+  winMod.register(winCtx)
+  restoreTimers()
+  sdk.host.state.focusedSessionId.set('sess-win')
+  sdk.host.state.focusedUsage.set(USAGE)
+  await settle(12)
+  const winOut = render(winContributions[0].render)
+  const winCost = (winOut.text.match(/\$[\d.]+/) || [])[0]
+  const expectWinUsd = (36000 * 0.15 + 84000 * 0.003 + 8000 * 0.6) / 1000000
+  check('Windows gateway: chip shows real value after python3 fails', winCost === '$' + expectWinUsd.toFixed(3), 'want $' + expectWinUsd.toFixed(3) + ' got ' + winCost + ' text=' + winOut.text)
+  check('Windows gateway: working interpreter is cached', stored.py_cmd === 'python', 'stored=' + stored.py_cmd)
 }
 
 // =========================================================== opencode-usage ==
 async function testOpencodeUsage() {
   console.log('--- opencode-usage')
-  const { bad, canonHash, localHash, mod } = await loadPlugin('opencode-usage')
+  const { bad, canonHash, localHash } = await loadPlugin('opencode-usage')
   check('import scan clean', bad.length === 0, JSON.stringify(bad))
   check('copy byte-identical to canonical', canonHash === localHash)
-  check('id matches folder', mod.id === 'opencode-usage', mod.id)
 
   const snap = makeSnapshot(Date.now())
-  sdk.setRpc(async method => {
+
+  // Functional tests run against an installed copy so the SCRIPTS_DIR token is
+  // resolved the same way install.sh resolves it.
+  const { mod } = await loadPlugin('opencode-usage', { fresh: 1, scriptsDir: '/tmp/hdp-test/scripts' })
+  check('id matches folder', mod.id === 'opencode-usage', mod.id)
+
+  sdk.setRpc(async (method, params) => {
     if (method === 'shell.exec') return { stdout: JSON.stringify(snap), stderr: '', code: 0 }
     return {}
   })
@@ -445,6 +493,35 @@ async function testOpencodeUsage() {
   check('chip tick arms 1s and poll arms 60s', true)
   console.log('    chip text:', chipOut.text)
   console.log('    page summary:', (pageOut.text.match(/Next reset in[^|]*/) || [''])[0])
+
+  // Windows-hosted gateway: python3 is the dead Microsoft Store alias (exit 49),
+  // but `python` is the real interpreter. The plugin must fall back and cache it.
+  const winMod = (await loadPlugin('opencode-usage', { fresh: 2, scriptsDir: '/tmp/hdp-test/scripts' })).mod
+  const stored = { py_cmd: null }
+  const { ctx: winCtx, contributions: winContributions } = captureCtx()
+  winCtx.storage = {
+    get: k => (k === 'py_cmd' ? stored.py_cmd : undefined),
+    set: (k, v) => { if (k === 'py_cmd') stored.py_cmd = v }
+  }
+  sdk.setRpc(async (method, params) => {
+    if (method === 'shell.exec') {
+      const cmd = String(params && params.command || '')
+      if (cmd.startsWith('python3 ')) return { stdout: '', stderr: 'Python was not found; run install.sh on the gateway', code: 49 }
+      if (cmd.startsWith('python ')) return { stdout: JSON.stringify(snap), stderr: '', code: 0 }
+      return { stdout: '', stderr: 'bad candidate', code: 1 }
+    }
+    return {}
+  })
+  stubTimers()
+  winMod.register(winCtx)
+  restoreTimers()
+  await settle()
+
+  const winChip = winContributions.find(c => c.area === 'statusBar.right')
+  const winChipOut = render(winChip.render)
+  const winWantPct = snap.windows.rolling.used_percent + '/' + snap.windows.weekly.used_percent + '/' + snap.windows.monthly.used_percent + '%'
+  check('Windows gateway: chip shows real value after python3 fails', winChipOut.text.includes(winWantPct), 'want ' + winWantPct + ' got ' + winChipOut.text)
+  check('Windows gateway: working interpreter is cached', stored.py_cmd === 'python', 'stored=' + stored.py_cmd)
 }
 
 // ================================================== hook-count oracle proof ==

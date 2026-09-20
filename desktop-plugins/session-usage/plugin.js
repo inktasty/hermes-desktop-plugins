@@ -22,9 +22,10 @@ import { jsx } from 'react/jsx-runtime'
 
 const ID = 'session-usage'
 const POLL_MS = 120000 // light poll; most updates arrive via the live stream
-// `install.sh` rewrites this line. It ships with the stock Ubuntu cloud gateway
-// home as the default; change it if your gateway's HERMES_HOME differs.
-const PRICE_CMD = 'python3 /home/ubuntu/.hermes/scripts/model_price_lookup.py'
+// `install.sh` sets the SCRIPTS_DIR constant below to this gateway's scripts path.
+const SCRIPT_NAME = 'model_price_lookup.py'
+const SCRIPTS_DIR = '__HERMES_SCRIPTS__'
+const PY_CANDIDATES = ['python3', 'python', 'py -3']
 
 // Live atoms are resolved ONCE at import, each with a null-atom fallback: a
 // build that lacks one of them can then never throw inside a render, and every
@@ -274,14 +275,40 @@ export default {
 
     // Rates are per 1M tokens, read from the gateway's model registry cache
     // (Hermes's own estimator cannot price providers like opencode-go).
+    async function runPriceScript(args) {
+      if (SCRIPTS_DIR.startsWith('__HERMES')) {
+        throw new Error('run install.sh on the gateway')
+      }
+      const cached = ctx.storage && typeof ctx.storage.get === 'function' ? ctx.storage.get('py_cmd') : null
+      const candidates = cached && typeof cached === 'string' ? [cached] : PY_CANDIDATES
+      let lastCode = null
+      const scriptPath = SCRIPTS_DIR + '/' + SCRIPT_NAME
+      for (const py of candidates) {
+        try {
+          const resp = await host.request('shell.exec', { command: py + ' ' + scriptPath + (args ? ' ' + args : '') })
+          const stdout = resp && resp.stdout ? String(resp.stdout) : ''
+          const code = resp && typeof resp.code === 'number' ? resp.code : 0
+          lastCode = code
+          const parsed = parseRates(stdout)
+          if (code === 0 && parsed) {
+            if (ctx.storage && typeof ctx.storage.set === 'function' && py !== cached) {
+              ctx.storage.set('py_cmd', py)
+            }
+            return parsed
+          }
+        } catch (e) {
+          // fall through to next candidate
+        }
+      }
+      const tried = (cached ? [cached] : PY_CANDIDATES).join(', ')
+      throw new Error('no working python on the gateway shell (tried ' + tried + ')' + (lastCode != null ? '; exit ' + lastCode : '') + '; run install.sh on the gateway')
+    }
+
     async function loadRates(model) {
       const want = String(model || '').trim()
       if (ratesFor === want) return
       try {
-        const resp = await host.request('shell.exec', {
-          command: want ? PRICE_CMD + ' ' + JSON.stringify(want) : PRICE_CMD
-        })
-        const parsed = parseRates(resp && resp.stdout ? resp.stdout : '')
+        const parsed = await runPriceScript(want ? JSON.stringify(want) : '')
         ratesFor = parsed ? want : null
         ratesData.set(parsed)
       } catch (e) {
