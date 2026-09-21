@@ -42,6 +42,26 @@ USER_AGENT = "hermes-desktop-plugin/1.0 (+https://hermes-agent.nousresearch.com)
 # shell.exec returns only the last 4000 chars of stdout; stay well under it.
 STDOUT_PLAIN_LIMIT = 3500
 
+# Caps and offers OpenCode announces on X but has not put in the docs yet. Keep
+# these short and always carry the source URL, so the table can say where a
+# number came from instead of passing an announcement off as documentation.
+ANNOUNCEMENTS = [
+    {
+        "match": "omen-alpha",
+        "cap_usd": 100.0,
+        "note": "Go-only stealth model: $100 of usage on the $10 plan",
+        "source": "https://x.com/opencode/status/2095746098522452093",
+        "date": "2026-09-04",
+    },
+    {
+        "match": "mimo-v2.6-flash",
+        "cap_usd": None,
+        "note": "Free for one week",
+        "source": "https://x.com/opencode/status/2102145730999730611",
+        "date": "2026-09-21",
+    },
+]
+
 TAG_RE = re.compile(r"<[^>]+>")
 SMALL_RE = re.compile(r"<small>(.*?)</small>", re.S)
 LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
@@ -375,7 +395,60 @@ def price_check(docs_tier, catalog_entry):
     return "match" if compared else None
 
 
-def build_model(model_id, docs, catalog):
+def parse_privacy(markdown):
+    """{norm(name): {training, retention, zdr, note_key}} + {note_key: {label, text}}.
+
+    The docs carry a Privacy table (model training + data retention) with
+    per-model footnotes; both feed the ZDR column in the plugin.
+    """
+    rows, notes = {}, {}
+    if not markdown:
+        return rows, notes
+    for block in table_blocks(markdown):
+        header = " ".join(block[0]).lower()
+        if "model training" not in header or "data retention" not in header:
+            continue
+        for cells in block[1:]:
+            if len(cells) < 3:
+                continue
+            name = strip_tags(cells[0]).strip()
+            training = strip_tags(cells[1]).strip()
+            retention = strip_tags(cells[2]).replace("\\", "").strip()
+            key = norm(name)
+            if not key:
+                continue
+            rows[key] = {
+                "training": "used" if training.lower().startswith("yes") else "not_used",
+                "retention": retention,
+                "zdr": retention.lower().startswith("0"),
+                "note_key": None,
+            }
+    for line in markdown.splitlines():
+        match = re.match(r"\s*[-*]\s+\*\*(.+?)\*\*:?\s*(.+?)\s*$", line)
+        if not match:
+            continue
+        label = strip_tags(match.group(1)).strip().rstrip(":")
+        text = strip_tags(match.group(2)).strip()
+        if not label or not text:
+            continue
+        notes[norm(label)] = {"label": label, "text": text}
+    for key, row in rows.items():
+        for note_key, note in notes.items():
+            candidates = [note_key] + [norm(part) for part in note["label"].split("/")]
+            if any(key == cand or key.startswith(cand) for cand in candidates if cand):
+                row["note_key"] = note_key
+                break
+    return rows, notes
+
+
+def announcement_for(model_id):
+    for item in ANNOUNCEMENTS:
+        if norm(item["match"]) == norm(model_id):
+            return item
+    return None
+
+
+def build_model(model_id, docs, catalog, privacy=None, notes=None):
     entry = docs.get(norm(model_id))
     catalog_entry = catalog.get(model_id) or {}
     tier = default_tier(entry) if entry else {}
@@ -422,6 +495,36 @@ def build_model(model_id, docs, catalog):
             "price_source": "catalog",
             "price_check": None,
         })
+
+    privacy = privacy or {}
+    notes = notes or {}
+    row = privacy.get(norm(model_id))
+    if row:
+        record["privacy"] = {
+            "training": row["training"],
+            "retention": row["retention"],
+            "zdr": row["zdr"],
+            "note_key": row["note_key"],
+        }
+    else:
+        record["privacy"] = None
+
+    announcement = announcement_for(model_id)
+    record["announcement"] = None
+    if announcement:
+        record["announcement"] = {
+            "note": announcement["note"],
+            "source": announcement["source"],
+            "date": announcement["date"],
+            "cap_usd": announcement["cap_usd"],
+        }
+        if announcement["cap_usd"] is not None:
+            # Announced by OpenCode, not in the docs: take the cap and label it.
+            record["monthly_usd"] = announcement["cap_usd"]
+            record["monthly_before_usd"] = None
+            record["cap_source"] = "announcement"
+    if record.get("monthly_usd") is not None and not record.get("cap_source"):
+        record["cap_source"] = "docs"
     return record
 
 
@@ -464,6 +567,7 @@ def main():
         errors.append("docs page request failed: " + str(exc))
 
     docs = parse_docs(markdown) if markdown else {}
+    privacy, privacy_notes = parse_privacy(markdown) if markdown else ({}, {})
     catalog, catalog_age, catalog_error = fetch_catalog()
     if catalog_error:
         errors.append(catalog_error)
@@ -474,8 +578,16 @@ def main():
         # No key or no API answer: fall back to the live catalog so the table still works.
         served = sorted(catalog)
 
-    records = [build_model(model_id, docs, catalog) for model_id in served]
+    records = [
+        build_model(model_id, docs, catalog, privacy, privacy_notes)
+        for model_id in served
+    ]
     served_keys = set(norm(model_id) for model_id in served)
+    referenced_notes = set(
+        record["privacy"]["note_key"]
+        for record in records
+        if record.get("privacy") and record["privacy"].get("note_key")
+    )
     known_docs_keys = set(norm(k) for k in catalog)
     doc_only = [
         {
@@ -502,6 +614,23 @@ def main():
             "price_from_catalog": len([r for r in records if r.get("price_source") == "catalog"]),
         },
         "models": sort_models(records),
+        "announcements": [
+            {
+                "model_key": record["id"],
+                "name": record.get("name"),
+                "note": record["announcement"]["note"],
+                "source": record["announcement"]["source"],
+                "date": record["announcement"]["date"],
+                "cap_usd": record["announcement"]["cap_usd"],
+            }
+            for record in sort_models(records)
+            if record.get("announcement")
+        ],
+        "privacy_notes": [
+            {"key": key, "label": note["label"], "text": note["text"]}
+            for key, note in sorted(privacy_notes.items())
+            if key in referenced_notes
+        ],
         "docs_only": doc_only,
         "sources": {
             "api": bool(ids),
