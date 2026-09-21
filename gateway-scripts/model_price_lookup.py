@@ -12,6 +12,11 @@ Usage:
 With no arguments, the model/provider from config.yaml (`model.default`,
 `model.provider`) are used. Prints ONE line of JSON on stdout. Never prints
 credentials.
+
+`released` is the matched registry entry's release_date, verbatim and
+unformatted (null when the registry publishes none for it): the desktop panel
+renders it without shifting the day. ok:true as soon as EITHER a cost card or a
+release date resolved, so an entry with no cost dict still answers.
 """
 
 import json
@@ -53,18 +58,29 @@ def config_model_provider() -> tuple:
     return model, provider
 
 
-def rates_for(cache: dict, provider: str, model: str) -> dict:
-    entry = cache.get(provider)
-    models = entry.get("models") if isinstance(entry, dict) else None
+def entry_for(cache: dict, provider: str, model: str):
+    """The registry ENTRY for this model under `provider`, or None.
+
+    Callers want the entry itself, not only its cost card: the registry carries
+    entries with a release_date and no cost dict at all, and those still answer
+    with a date.
+    """
+    section = cache.get(provider)
+    models = section.get("models") if isinstance(section, dict) else None
     if not isinstance(models, dict):
-        return {}
+        return None
     hit = models.get(model)
     if hit is None:
         # Tolerate date/snapshot suffixes: exact prefix match, shortest id wins.
         cands = [k for k in models if k.lower().startswith(model.lower()) or model.lower().startswith(k.lower())]
         if not cands:
-            return {}
+            return None
         hit = models[sorted(cands, key=len)[0]]
+    return hit if isinstance(hit, dict) else None
+
+
+def rates_of(hit) -> dict:
+    """The cost keys of one registry entry, {} when it publishes none."""
     cost = hit.get("cost") if isinstance(hit, dict) else None
     if not isinstance(cost, dict):
         return {}
@@ -83,27 +99,57 @@ def rates_for(cache: dict, provider: str, model: str) -> dict:
     return out
 
 
+def released_of(hit):
+    """The entry's release_date exactly as the registry publishes it, or None.
+
+    A bare 'YYYY-MM-DD' string: never reformatted here, never defaulted to a
+    made-up date. The display layer formats it without shifting the day.
+    """
+    value = hit.get("release_date") if isinstance(hit, dict) else None
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def rates_for(cache: dict, provider: str, model: str) -> dict:
+    """Cost keys for one model under one provider, {} when there are none."""
+    return rates_of(entry_for(cache, provider, model))
+
+
 # Preference when the session's model is served by several catalog providers.
 PROVIDER_PREFERENCE = ("opencode-go", "opencode-zen", "opencode", "openrouter", "deepseek", "nous")
 
 
-def resolve_rates(cache: dict, provider: str, model: str) -> tuple:
-    """(rates, provider_used). Falls back to whichever provider in the cache
-    carries this model id, so a mid-session provider switch still prices."""
-    rates = rates_for(cache, provider, model) if provider else {}
-    if rates:
-        return rates, provider
-    ranked = sorted(
-        (k for k in cache if isinstance(cache.get(k), dict)),
-        key=lambda k: (PROVIDER_PREFERENCE.index(k) if k in PROVIDER_PREFERENCE else len(PROVIDER_PREFERENCE), k),
-    )
-    for candidate in ranked:
-        if candidate == provider:
-            continue
-        rates = rates_for(cache, candidate, model)
-        if rates:
-            return rates, candidate
-    return {}, provider
+def resolve_lookup(cache: dict, provider: str, model: str) -> tuple:
+    """(rates, released, provider_used) for one model.
+
+    The session's own provider wins when it carries the id, even if that entry
+    publishes no cost (its date still answers). Otherwise the registry is
+    searched in PROVIDER_PREFERENCE order, preferring a provider that also
+    prices the model. `provider_used` is where the entry came from.
+    """
+    hit = entry_for(cache, provider, model) if provider else None
+    used = provider
+    if hit is None:
+        ranked = sorted(
+            (k for k in cache if isinstance(cache.get(k), dict)),
+            key=lambda k: (PROVIDER_PREFERENCE.index(k) if k in PROVIDER_PREFERENCE else len(PROVIDER_PREFERENCE), k),
+        )
+        found = []
+        for candidate in ranked:
+            if candidate == provider:
+                continue
+            other = entry_for(cache, candidate, model)
+            if other is not None:
+                found.append((candidate, other))
+        priced = next((pair for pair in found if rates_of(pair[1])), None)
+        chosen = priced or (found[0] if found else None)
+        if chosen:
+            used, hit = chosen
+    if hit is None:
+        return {}, None, provider
+    return rates_of(hit), released_of(hit), used
 
 
 def main() -> None:
@@ -123,9 +169,11 @@ def main() -> None:
     except (OSError, ValueError) as exc:
         fail(f"cannot read registry cache: {exc}")
 
-    rates, used = resolve_rates(cache, provider, model)
-    if not rates:
-        fail(f"no rates cached for {model} (tried provider {provider!r} and the rest of the registry)")
+    rates, released, used = resolve_lookup(cache, provider, model)
+    # ok:true when EITHER a cost card or a release date resolved. Only a model
+    # the registry does not know at all is a failure.
+    if not rates and released is None:
+        fail(f"no registry entry for {model} (tried provider {provider!r} and the rest of the registry)")
     print(json.dumps({
         "ok": True,
         "provider": used,
@@ -133,8 +181,10 @@ def main() -> None:
         "model": model,
         "unit": "usd_per_million_tokens",
         "source": "models.dev registry cache",
+        # The matched entry's release_date, verbatim; null when it has none.
+        "released": released,
         **rates,
-    }))
+    }, separators=(",", ":")))
 
 
 if __name__ == "__main__":

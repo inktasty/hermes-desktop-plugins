@@ -89,6 +89,18 @@ const settle = async (n = 8) => {
   for (let i = 0; i < n; i += 1) await new Promise(r => setImmediate(r))
 }
 
+// The models fetch is fired by the palette command but not awaited by it, just
+// like the real app, and the gzip inflate resolves on its own schedule. Render
+// until the expected text lands (bounded), instead of guessing a turn count.
+async function waitForText(Comp, re, turns = 3000) {
+  let out = render(Comp)
+  for (let i = 0; i < turns && !re.test(out.text); i += 1) {
+    await new Promise(r => setImmediate(r))
+    out = render(Comp)
+  }
+  return out
+}
+
 function primOf(out, name) {
   return out.prims.filter(p => p.name === name)
 }
@@ -217,6 +229,19 @@ function packPayload(payload) {
   const line = JSON.stringify(payload)
   if (line.length <= 3500) return line
   return JSON.stringify({ ok: payload.ok, gzip: gzipSync(Buffer.from(line)).toString('base64') })
+}
+
+// Release dates as the models.dev registry publishes them: bare YYYY-MM-DD.
+// 'low-cap' stays null so the table's "not in the model registry" dash is
+// exercised; 'promo-model' carries the same-day-in-UTC date that a local-time
+// formatter would render as the previous day west of UTC.
+const FIXTURE_RELEASES = {
+  'promo-model': '2026-09-22',
+  'cap-no-promo': '2026-04-24',
+  'low-cap': null,
+  'omen-alpha': '2026-09-04',
+  'catalog-priced': '2026-08-21',
+  'tiered-model': '2026-05-21'
 }
 
 function makeModelsPayload(now) {
@@ -363,7 +388,7 @@ function makeModelsPayload(now) {
         cap_source: null,
         announcement: null
       }
-    ],
+    ].map(m => ({ released: FIXTURE_RELEASES[m.id] || null, ...m })),
     announcements: [
       {
         model_key: 'omen-alpha',
@@ -570,6 +595,12 @@ async function testSessionUsage() {
   const pop = primOf(out, 'PopoverContent')[0]
   check('panel lists input/output/cost rows', pop && /Input tokens/.test(out.text) && /Session cost/.test(out.text), out.text)
 
+  // Released row: present in the normal panel, with a dash (and a reason) when
+  // the gateway payload carries no registry date.
+  check('panel labels the release date row', /Released/.test(out.text), out.text)
+  check('a panel with no registry date explains the dash',
+    out.titles.includes('the model registry publishes no release date for this model'), JSON.stringify(out.titles))
+
   // Per-1M rates block: caption line plus one data line of label/value pairs
   check('panel shows the rates block caption', /Rates per 1M tokens/.test(out.text), out.text)
   check('panel rate line has the three labelled off-peak amounts', /in \$0\.15 out \$0\.60 cache \$0\.003/.test(out.text), out.text)
@@ -633,6 +664,46 @@ async function testSessionUsage() {
   }
   check('useValue count never changes across transitions', new Set(counts.map(c => c[1])).size === 1, JSON.stringify(counts))
   check('no render error in any transition', counts.every(c => c[2] === null), JSON.stringify(counts))
+
+  // A registry entry that publishes a release date but NO cost card: the gateway
+  // payload carries no input/output at all. It must parse (the old parseRates
+  // rejected it), show the date, and never render a rates block or a row of
+  // dashed rates.
+  const dateMod = (await loadPlugin('session-usage', { fresh: 3, scriptsDir: '/tmp/hdp-test/scripts' })).mod
+  const dateOnlyLine = JSON.stringify({
+    ok: true, provider: 'opencode-go', requested_provider: 'opencode-go',
+    model: 'mimo-v2.6-flash', unit: 'usd_per_million_tokens', released: '2026-09-22'
+  })
+  sdk.setRpc(async (method, params) => {
+    if (method === 'session.usage') return { model: 'mimo-v2.6-flash' }
+    if (method === 'shell.exec') return { stdout: dateOnlyLine + '\n', stderr: '', code: 0 }
+    return {}
+  })
+  stubTimers()
+  Date.now = () => Date.UTC(2026, 8, 16, 20, 0)
+  const dateCtx = captureCtx()
+  dateMod.register(dateCtx.ctx)
+  restoreTimers()
+  sdk.host.state.focusedSessionId.set('sess-date')
+  sdk.host.state.focusedUsage.set(null)
+  const dateFetch = timers.find(t => t.ms === 120000)?.fn
+  if (typeof dateFetch === 'function') await dateFetch()
+  await settle()
+  const dateOut = render(dateCtx.contributions[0].render)
+  check('date-only payload renders the registry date', /Sep 22, 2026/.test(dateOut.text), dateOut.text)
+  check('date-only payload never renders a rates block', !/Rates per 1M tokens/.test(dateOut.text), dateOut.text)
+  check('date-only payload never renders dashed rates', !/in — out — cache —/.test(dateOut.text), dateOut.text)
+  check('date-only payload renders with no error', !dateOut.err, dateOut.err && dateOut.err.message)
+
+  // Dated AND priced: both the date and the rates block show.
+  const bothOut = render(dateMod.SessionPanel, {
+    u: {}, est: null, error: null,
+    rates: { ok: true, provider: 'opencode-go', model: 'mimo-v2.6-flash', released: '2026-09-22', input: 0.14, output: 0.28, cache_read: 0.0028 }
+  })
+  check('a dated, priced model shows the date and the rates',
+    /Sep 22, 2026/.test(bothOut.text) && /Rates per 1M tokens/.test(bothOut.text), bothOut.text)
+  check('the panel date is never shifted a day west of UTC', !/Sep 21, 2026/.test(bothOut.text), bothOut.text)
+  Date.now = realNow
 
   // older build: capability atoms absent
   const saved = { f: sdk.host.state.focusedSessionId, a: sdk.host.state.activeSessionId }
@@ -727,7 +798,7 @@ async function testOpencodeUsage() {
   const chipOut = render(chip.render)
   const wantPct = snap.windows.rolling.used_percent + '/' + snap.windows.weekly.used_percent + '/' + snap.windows.monthly.used_percent + '%'
   check('chip shows three window percentages', chipOut.text.includes(wantPct), 'want ' + wantPct + ' got ' + chipOut.text)
-  const pageOut = render(page.render)
+  const pageOut = await waitForText(page.render, /Models on Go\s*7/)
   check('page renders three window columns', primOf(pageOut, 'StatusDot').length >= 3, String(primOf(pageOut, 'StatusDot').length))
   check('page shows reset countdowns', /Resets in/.test(pageOut.text), pageOut.text.slice(0, 200))
   check('page flags the monthly window ahead of pace', /Ahead of pace/.test(pageOut.text), pageOut.text.slice(0, 300))
@@ -742,14 +813,23 @@ async function testOpencodeUsage() {
   check('page shows catalog-priced dagger', /†/.test(pageOut.text), pageOut.text)
   check('page shows difference count', /1 of 7 prices differ/.test(pageOut.text), pageOut.text)
   check('page shows uncapped group header', /Also served by Go, no published cap/.test(pageOut.text), pageOut.text)
+  check('the uncapped divider spans all eight columns', source.includes('col-span-8'), source.slice(0, 60))
   check('page shows plan notes', /Contributor Program:/.test(pageOut.text), pageOut.text)
 
   // Layout (Part A)
-  check('grid is seven columns with a floor under the name column',
-    source.includes('minmax(11rem, 1.6fr) 4rem 4rem 4.5rem 3.5rem 4.5rem 3.5rem'))
+  check('grid is eight columns with a floor under the name column',
+    source.includes('minmax(11rem, 1.6fr) 5.5rem 4rem 4rem 4.5rem 3.5rem 4.5rem 3.5rem'))
   check('model name no longer truncates', !/truncate/.test(source))
   check('grid sits in an overflow-x-auto container', source.includes("'overflow-x-auto'"))
-  check('every column has a header cell', /Model\s+In\s+Out\s+Cache\s+Cap\s+≈ Req\/mo\s+ZDR/.test(pageOut.text), pageOut.text.slice(0, 700))
+  check('every column has a header cell', /Model\s+Released\s+In\s+Out\s+Cache\s+Cap\s+≈ Req\/mo\s+ZDR/.test(pageOut.text), pageOut.text.slice(0, 700))
+
+  // Released column: the registry date, formatted without a timezone shift, and
+  // a dash that names the reason when the registry publishes no date.
+  check('released column renders the registry date', /Sep 22, 2026/.test(pageOut.text), pageOut.text)
+  check('a UTC date is never shifted a day by the local zone', !/Sep 21, 2026/.test(pageOut.text), pageOut.text)
+  check('a model with no registry date is a dash that says why',
+    pageOut.titles.includes('not in the model registry, so it has no published release date'), JSON.stringify(pageOut.titles))
+  check('the stored models payload key was bumped for the new column', source.includes("'models_v2'") && !source.includes("'models_v1'"), source.slice(0, 60))
 
   // ZDR column (Part B)
   check('ZDR cell for a zero-retention model reads 0d', /\b0d\b/.test(pageOut.text), pageOut.text)
@@ -833,7 +913,7 @@ async function testOpencodeUsage() {
   })
   await refreshPalette.data.run()
   await settle(20)
-  const bigOut = render(page.render)
+  const bigOut = await waitForText(page.render, /Bulk Model 39/)
   check('gzipped catalog inflates and renders every row', /Models on Go\s*40/.test(bigOut.text) && /Bulk Model 39/.test(bigOut.text), bigOut.text.slice(0, 300))
 
   // Truncated stdout, i.e. what the gateway hands back for an over-budget payload.
@@ -848,7 +928,7 @@ async function testOpencodeUsage() {
   })
   await refreshPalette.data.run()
   await settle(20)
-  const truncOut = render(page.render)
+  const truncOut = await waitForText(page.render, /could not parse/)
   check('truncated catalog still renders the section header', /Models on Go/.test(truncOut.text), truncOut.text.slice(0, 300))
   check('truncated catalog says why instead of staying blank', /could not parse/.test(truncOut.text), truncOut.text.slice(0, 400))
 
@@ -889,7 +969,9 @@ async function testOpencodeUsage() {
   // says it is -- a two-hour-old cache must never report 'just now'.
   const freshMod = (await loadPlugin('opencode-usage', { fresh: 3, scriptsDir: '/tmp/hdp-test/scripts' })).mod
   const stalePayload = makeModelsPayload(Date.now() - 2 * 3600000)
-  const restored = { models_v1: stalePayload }
+  // The live storage key: a payload cached before the Released column existed
+  // lives under models_v1 and is deliberately ignored.
+  const restored = { models_v2: stalePayload }
   const { ctx: freshCtx, contributions: freshContributions } = captureCtx()
   freshCtx.storage = {
     get: (k, f) => (k in restored ? restored[k] : f),
