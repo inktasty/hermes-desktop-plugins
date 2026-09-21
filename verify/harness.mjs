@@ -5,6 +5,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
+import { gzipSync } from 'node:zlib'
 import * as sdk from '@hermes/plugin-sdk'
 import { jsx } from 'react/jsx-runtime'
 
@@ -208,6 +209,15 @@ function makeSnapshot(now) {
 }
 
 // Synthetic models payload: no account data, every shape the table must handle.
+// packPayload mirrors scripts/opencode_go_models.py: over the gateway's stdout
+// budget the payload travels gzipped+base64 and the plugin inflates it, so the
+// harness must exercise that path rather than a plain JSON string.
+function packPayload(payload) {
+  const line = JSON.stringify(payload)
+  if (line.length <= 3500) return line
+  return JSON.stringify({ ok: payload.ok, gzip: gzipSync(Buffer.from(line)).toString('base64') })
+}
+
 function makeModelsPayload(now) {
   return {
     ok: true,
@@ -605,7 +615,7 @@ async function testOpencodeUsage() {
   sdk.setRpc(async (method, params) => {
     if (method === 'shell.exec') {
       const cmd = String(params && params.command || '')
-      if (cmd.includes('opencode_go_models.py')) return { stdout: JSON.stringify(modelsPayload), stderr: '', code: 0 }
+      if (cmd.includes('opencode_go_models.py')) return { stdout: packPayload(modelsPayload), stderr: '', code: 0 }
       if (cmd.includes('opencode_go_usage.py')) return { stdout: JSON.stringify(snap), stderr: '', code: 0 }
     }
     return {}
@@ -678,6 +688,49 @@ async function testOpencodeUsage() {
   check('models failure shows error line instead of blank', /Gateway call failed/.test(failOut.text), failOut.text)
   check('models failure keeps last table', /Models on Go/.test(failOut.text), failOut.text)
 
+  // A real catalog is ~13 KB, and the gateway hands back only the last 4000 chars of
+  // stdout, so the script ships it gzipped+base64. Prove the plugin inflates it.
+  const bigPayload = {
+    ...modelsPayload,
+    counts: { ...modelsPayload.counts, served: 40 },
+    models: Array.from({ length: 40 }, (_, i) => ({
+      ...modelsPayload.models[0], id: 'bulk-model-' + i, name: 'Bulk Model ' + i, promo: null, price_source: 'docs'
+    }))
+  }
+  const bigPlain = JSON.stringify(bigPayload)
+  check('large fixture is over the plain stdout budget', bigPlain.length > 4000, String(bigPlain.length))
+  const packed = packPayload(bigPayload)
+  check('large payload travels gzipped under the budget', packed.includes('"gzip"') && packed.length < 4000, String(packed.length))
+
+  sdk.setRpc(async (method, params) => {
+    if (method === 'shell.exec') {
+      const cmd = String(params && params.command || '')
+      if (cmd.includes('opencode_go_models.py')) return { stdout: packed, stderr: '', code: 0 }
+      if (cmd.includes('opencode_go_usage.py')) return { stdout: JSON.stringify(snap), stderr: '', code: 0 }
+    }
+    return {}
+  })
+  await refreshPalette.data.run()
+  await settle(20)
+  const bigOut = render(page.render)
+  check('gzipped catalog inflates and renders every row', /Models on Go\s*40/.test(bigOut.text) && /Bulk Model 39/.test(bigOut.text), bigOut.text.slice(0, 300))
+
+  // Truncated stdout, i.e. what the gateway hands back for an over-budget payload.
+  // The section must name the reason instead of rendering nothing at all.
+  sdk.setRpc(async (method, params) => {
+    if (method === 'shell.exec') {
+      const cmd = String(params && params.command || '')
+      if (cmd.includes('opencode_go_models.py')) return { stdout: bigPlain.slice(-4000), stderr: '', code: 0 }
+      if (cmd.includes('opencode_go_usage.py')) return { stdout: JSON.stringify(snap), stderr: '', code: 0 }
+    }
+    return {}
+  })
+  await refreshPalette.data.run()
+  await settle(20)
+  const truncOut = render(page.render)
+  check('truncated catalog still renders the section header', /Models on Go/.test(truncOut.text), truncOut.text.slice(0, 300))
+  check('truncated catalog says why instead of staying blank', /could not parse/.test(truncOut.text), truncOut.text.slice(0, 400))
+
   // Windows-hosted gateway: python3 is the dead Microsoft Store alias (exit 49),
   // but `python` is the real interpreter. The plugin must fall back and cache it.
   const winMod = (await loadPlugin('opencode-usage', { fresh: 2, scriptsDir: '/tmp/hdp-test/scripts' })).mod
@@ -692,7 +745,7 @@ async function testOpencodeUsage() {
       const cmd = String(params && params.command || '')
       if (cmd.startsWith('python3 ')) return { stdout: '', stderr: 'Python was not found; run install.sh on the gateway', code: 49 }
       if (cmd.startsWith('python ')) {
-        if (cmd.includes('opencode_go_models.py')) return { stdout: JSON.stringify(modelsPayload), stderr: '', code: 0 }
+        if (cmd.includes('opencode_go_models.py')) return { stdout: packPayload(modelsPayload), stderr: '', code: 0 }
         return { stdout: JSON.stringify(snap), stderr: '', code: 0 }
       }
       return { stdout: '', stderr: 'bad candidate', code: 1 }
