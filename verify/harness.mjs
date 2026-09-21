@@ -6,6 +6,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import * as sdk from '@hermes/plugin-sdk'
+import { jsx } from 'react/jsx-runtime'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const CANON = process.env.PLUGIN_SRC || path.join(HERE, '..', 'desktop-plugins')
@@ -133,7 +134,6 @@ function stubTimers() {
 function restoreTimers() {
   globalThis.setInterval = realSetInterval
   globalThis.clearInterval = realClearInterval
-  Date.now = realNow
 }
 
 async function loadPlugin(id, { fresh = 0, scriptsDir = null } = {}) {
@@ -204,6 +204,103 @@ function makeSnapshot(now) {
       }
     },
     error: null
+  }
+}
+
+// Synthetic models payload: no account data, every shape the table must handle.
+function makeModelsPayload(now) {
+  return {
+    ok: true,
+    fetched_at: new Date(now).toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    docs_url: 'https://opencode.ai/docs/go',
+    plan: {
+      price_usd_month: 10,
+      intro_offer_usd: null,
+      five_hour_share: 0.2,
+      weekly_share: 0.5,
+      notes: [
+        { name: 'Contributor Program', text: 'Discounted pricing in exchange for training data.' }
+      ]
+    },
+    promos: [
+      { model_key: 'promo-model', name: 'Promo Model', label: '4x · Ends Sep 27', monthly_usd: 60, monthly_before_usd: 15 }
+    ],
+    counts: { served: 5, with_caps: 3, catalog_mismatch: 1, price_from_catalog: 1 },
+    models: [
+      {
+        id: 'promo-model',
+        name: 'Promo Model',
+        input: 0.15, output: 0.6, cache_read: 0.003,
+        monthly_usd: 60, monthly_before_usd: 15,
+        req_5h: 26000, req_week: 65000, req_month: 130000,
+        context: 1000000,
+        promo: '4x · Ends Sep 27',
+        in_docs: true,
+        price_source: 'docs',
+        catalog: { input: 0.15, output: 0.6, cache_read: 0.003 },
+        price_check: 'match',
+        tiers: []
+      },
+      {
+        id: 'cap-no-promo',
+        name: 'Cap No Promo',
+        input: 1.4, output: 4.4, cache_read: 0.26,
+        monthly_usd: 60, monthly_before_usd: null,
+        req_5h: 880, req_week: 2150, req_month: 4300,
+        context: 1000000,
+        promo: null,
+        in_docs: true,
+        price_source: 'docs',
+        catalog: { input: 1.4, output: 4.4, cache_read: 0.26 },
+        price_check: 'match',
+        tiers: []
+      },
+      {
+        id: 'low-cap',
+        name: 'Low Cap',
+        input: 0.15, output: 0.6, cache_read: 0.003,
+        monthly_usd: 15, monthly_before_usd: null,
+        req_5h: 6500, req_week: 16250, req_month: 32500,
+        context: 1000000,
+        promo: null,
+        in_docs: true,
+        price_source: 'docs',
+        catalog: { input: 0.15, output: 0.6, cache_read: 0.003 },
+        price_check: 'match',
+        tiers: [{ label: 'Peak', input: 0.3, output: 1.2, cache_read: 0.006, cache_write: null }]
+      },
+      {
+        id: 'catalog-priced',
+        name: 'Catalog Priced',
+        input: 0.2, output: 0.66, cache_read: 0.04,
+        monthly_usd: null, monthly_before_usd: null,
+        req_5h: null, req_week: null, req_month: null,
+        context: 500000,
+        promo: null,
+        in_docs: false,
+        price_source: 'catalog',
+        catalog: { input: 0.2, output: 0.66, cache_read: 0.04 },
+        price_check: null,
+        tiers: []
+      },
+      {
+        id: 'tiered-model',
+        name: 'Tiered Model',
+        input: 0.5, output: 3.0, cache_read: 0.05,
+        monthly_usd: 60, monthly_before_usd: null,
+        req_5h: 3300, req_week: 8200, req_month: 16300,
+        context: 1000000,
+        promo: null,
+        in_docs: true,
+        price_source: 'docs',
+        catalog: { input: 0.5, output: 3.0, cache_read: 0.05 },
+        price_check: 'differs',
+        tiers: [{ label: '> 256K tokens', input: 2.0, output: 6.0, cache_read: 0.2, cache_write: 2.5 }]
+      }
+    ],
+    docs_only: [],
+    sources: { api: true, docs: true, catalog: true, catalog_age_s: 0 },
+    errors: []
   }
 }
 
@@ -356,9 +453,12 @@ async function testSessionUsage() {
     return {}
   })
   stubTimers()
+  Date.now = () => Date.UTC(2026, 8, 16, 20, 0) // force off-peak for stable math
   const { ctx, contributions } = captureCtx()
   mod.register(ctx)
   restoreTimers()
+  // Grab the plugin's internal fetch helper by looking for the interval callback.
+  const fetchOnce = timers.find(t => t.ms === 120000)?.fn
   check('registers exactly one contribution', contributions.length === 1, String(contributions.length))
   const chip = contributions[0]
   check('chip in statusBar.right', chip.area === 'statusBar.right', chip.area)
@@ -378,6 +478,36 @@ async function testSessionUsage() {
 
   const pop = primOf(out, 'PopoverContent')[0]
   check('panel lists input/output/cost rows', pop && /Input tokens/.test(out.text) && /Session cost/.test(out.text), out.text)
+
+  // Per-1M rate row
+  check('panel shows Per 1M rate row', /Per 1M: in\/out\/cache/.test(out.text), out.text)
+  check('panel rate row has the three off-peak amounts', /Per 1M: in\/out\/cache \$0\.15 \/ \$0\.6[0]? \/ \$0\.003/.test(out.text), out.text)
+
+  // Peak card in force: move the clock, re-fetch (which re-prices the live
+  // session at the new card) and re-render.
+  Date.now = () => Date.UTC(2026, 8, 16, 2, 0) // Wed peak
+  if (typeof fetchOnce === 'function') await fetchOnce()
+  sdk.host.state.focusedUsage.set(USAGE)
+  await settle()
+  const peakOut = render(chip.render)
+  check('peak panel shows Peak per 1M row', /Peak per 1M: in\/out\/cache/.test(peakOut.text), peakOut.text)
+  check('peak panel doubles all three rates', /Peak per 1M: in\/out\/cache \$0\.3[0-9]? \/ \$1\.20 \/ \$0\.006/.test(peakOut.text), peakOut.text)
+  // Empty-state branch still shows the rate row when rates are loaded
+  sdk.host.state.focusedUsage.set(null)
+  sdk.host.state.focusedSessionId.set('sess-empty')
+  sdk.setRpc(async (method, params) => {
+    if (method === 'session.usage') return { model: 'deepseek-v4.1-flash' }
+    if (method === 'shell.exec') return { stdout: priceLine + '\n', stderr: '', code: 0 }
+    return {}
+  })
+  Date.now = () => Date.UTC(2026, 8, 16, 20, 0)
+  if (typeof fetchOnce === 'function') await fetchOnce()
+  await settle()
+  // Verify the empty-state panel path directly: no turns, but rates loaded.
+  const emptyRates = { input: 0.15, output: 0.6, cache_read: 0.003, provider: 'opencode-go', model: 'deepseek-v4.1-flash' }
+  const emptyOut = render(mod.SessionPanel, { u: {}, est: null, error: null, rates: emptyRates })
+  check('empty-state panel shows no-turns message', /No turns yet/.test(emptyOut.text), emptyOut.text)
+  check('empty-state panel shows rate row', /Per 1M: in\/out\/cache/.test(emptyOut.text), emptyOut.text)
 
   // hook-count oracle across transitions
   const counts = []
@@ -428,6 +558,7 @@ async function testSessionUsage() {
     return {}
   })
   stubTimers()
+  Date.now = () => Date.UTC(2026, 8, 16, 20, 0) // force off-peak for stable math
   winMod.register(winCtx)
   restoreTimers()
   sdk.host.state.focusedSessionId.set('sess-win')
@@ -438,6 +569,7 @@ async function testSessionUsage() {
   const expectWinUsd = (36000 * 0.15 + 84000 * 0.003 + 8000 * 0.6) / 1000000
   check('Windows gateway: chip shows real value after python3 fails', winCost === '$' + expectWinUsd.toFixed(3), 'want $' + expectWinUsd.toFixed(3) + ' got ' + winCost + ' text=' + winOut.text)
   check('Windows gateway: working interpreter is cached', stored.py_cmd === 'python', 'stored=' + stored.py_cmd)
+  Date.now = realNow
 }
 
 // =========================================================== opencode-usage ==
@@ -448,6 +580,7 @@ async function testOpencodeUsage() {
   check('copy byte-identical to canonical', canonHash === localHash)
 
   const snap = makeSnapshot(Date.now())
+  const modelsPayload = makeModelsPayload(Date.now())
 
   // Functional tests run against an installed copy so the SCRIPTS_DIR token is
   // resolved the same way install.sh resolves it.
@@ -455,10 +588,15 @@ async function testOpencodeUsage() {
   check('id matches folder', mod.id === 'opencode-usage', mod.id)
 
   sdk.setRpc(async (method, params) => {
-    if (method === 'shell.exec') return { stdout: JSON.stringify(snap), stderr: '', code: 0 }
+    if (method === 'shell.exec') {
+      const cmd = String(params && params.command || '')
+      if (cmd.includes('opencode_go_models.py')) return { stdout: JSON.stringify(modelsPayload), stderr: '', code: 0 }
+      if (cmd.includes('opencode_go_usage.py')) return { stdout: JSON.stringify(snap), stderr: '', code: 0 }
+    }
     return {}
   })
   stubTimers()
+  Date.now = () => Date.UTC(2026, 8, 16, 20, 0)
   const { ctx, contributions } = captureCtx()
   mod.register(ctx)
   restoreTimers()
@@ -474,6 +612,12 @@ async function testOpencodeUsage() {
   check('nav row shape', nav && nav.data.label === 'OpenCode Go' && nav.data.codicon === 'pulse' && nav.data.path === '/opencode-go', nav && JSON.stringify(nav.data))
   check('palette rows have id/label/run', contributions.filter(c => c.area === 'palette').every(c => c.data.id && c.data.label && typeof c.data.run === 'function'))
 
+  // Load data synchronously through the palette refresh so the page and chip
+  // render with the synthetic snapshot and models payload.
+  const refreshPalette = contributions.find(c => c.area === 'palette' && c.data.id === 'opencodeGo.refresh')
+  await refreshPalette.data.run()
+  await settle(20)
+
   const chipOut = render(chip.render)
   const wantPct = snap.windows.rolling.used_percent + '/' + snap.windows.weekly.used_percent + '/' + snap.windows.monthly.used_percent + '%'
   check('chip shows three window percentages', chipOut.text.includes(wantPct), 'want ' + wantPct + ' got ' + chipOut.text)
@@ -484,6 +628,16 @@ async function testOpencodeUsage() {
   check('page shows the next-reset summary', /Next reset in/.test(pageOut.text), pageOut.text.slice(0, 200))
   check('page has no render error', !pageOut.err, pageOut.err && pageOut.err.message)
 
+  // Models table assertions
+  check('page shows Models on Go header', /Models on Go/.test(pageOut.text), pageOut.text)
+  check('page shows served count', pageOut.text.includes('5'), 'want 5 got ' + pageOut.text)
+  check('page shows cap values', /\$60/.test(pageOut.text) && /\$15/.test(pageOut.text), pageOut.text)
+  check('page shows promo badge label', /4x · Ends Sep 27/.test(pageOut.text), pageOut.text)
+  check('page shows catalog-priced dagger', /†/.test(pageOut.text), pageOut.text)
+  check('page shows difference count', /1 of 5 prices differ/.test(pageOut.text), pageOut.text)
+  check('page shows uncapped group header', /Also served by Go, no published cap/.test(pageOut.text), pageOut.text)
+  check('page shows plan notes', /Contributor Program:/.test(pageOut.text), pageOut.text)
+
   const counts = []
   for (const label of ['first', 'second', 'third']) {
     counts.push(render(chip.render).hooks)
@@ -493,6 +647,21 @@ async function testOpencodeUsage() {
   check('chip tick arms 1s and poll arms 60s', true)
   console.log('    chip text:', chipOut.text)
   console.log('    page summary:', (pageOut.text.match(/Next reset in[^|]*/) || [''])[0])
+
+  // Models fetch failure: last good table stays, error line shows.
+  sdk.setRpc(async (method, params) => {
+    if (method === 'shell.exec') {
+      const cmd = String(params && params.command || '')
+      if (cmd.includes('opencode_go_models.py')) return { stdout: 'boom', stderr: '', code: 1 }
+      if (cmd.includes('opencode_go_usage.py')) return { stdout: JSON.stringify(snap), stderr: '', code: 0 }
+    }
+    return {}
+  })
+  await refreshPalette.data.run()
+  await settle()
+  const failOut = render(page.render)
+  check('models failure shows error line instead of blank', /Gateway call failed/.test(failOut.text), failOut.text)
+  check('models failure keeps last table', /Models on Go/.test(failOut.text), failOut.text)
 
   // Windows-hosted gateway: python3 is the dead Microsoft Store alias (exit 49),
   // but `python` is the real interpreter. The plugin must fall back and cache it.
@@ -507,7 +676,10 @@ async function testOpencodeUsage() {
     if (method === 'shell.exec') {
       const cmd = String(params && params.command || '')
       if (cmd.startsWith('python3 ')) return { stdout: '', stderr: 'Python was not found; run install.sh on the gateway', code: 49 }
-      if (cmd.startsWith('python ')) return { stdout: JSON.stringify(snap), stderr: '', code: 0 }
+      if (cmd.startsWith('python ')) {
+        if (cmd.includes('opencode_go_models.py')) return { stdout: JSON.stringify(modelsPayload), stderr: '', code: 0 }
+        return { stdout: JSON.stringify(snap), stderr: '', code: 0 }
+      }
       return { stdout: '', stderr: 'bad candidate', code: 1 }
     }
     return {}
@@ -522,6 +694,7 @@ async function testOpencodeUsage() {
   const winWantPct = snap.windows.rolling.used_percent + '/' + snap.windows.weekly.used_percent + '/' + snap.windows.monthly.used_percent + '%'
   check('Windows gateway: chip shows real value after python3 fails', winChipOut.text.includes(winWantPct), 'want ' + winWantPct + ' got ' + winChipOut.text)
   check('Windows gateway: working interpreter is cached', stored.py_cmd === 'python', 'stored=' + stored.py_cmd)
+  Date.now = realNow
 }
 
 // ================================================== hook-count oracle proof ==

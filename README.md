@@ -7,8 +7,8 @@ from disk.
 | Plugin | Adds |
 | --- | --- |
 | `deepseek-rate` | A status-bar chip showing whether DeepSeek is billing peak (2x) or off-peak right now, in the viewer's own clock. Colors only while a DeepSeek model is active in the focused session. |
-| `opencode-usage` | A status-bar chip plus a full page: the three OpenCode Go quota windows (5-hour, weekly, monthly) with usage vs. time-elapsed gauges, pace projections, reset countdowns, and a Console button. |
-| `session-usage` | A status-bar chip showing the focused session's cost, with a hover panel of tokens, cache-hit rate, API calls, and context use. |
+| `opencode-usage` | A status-bar chip plus a full page: the three OpenCode Go quota windows (5-hour, weekly, monthly) with usage vs. time-elapsed gauges, pace projections, reset countdowns, a Console button, and a models table with per-model prices, caps, and promotions. |
+| `session-usage` | A status-bar chip showing the focused session's cost, with a hover panel of tokens, cache-hit rate, API calls, context use, and the current model's per-1M-token rates. |
 
 ## Requirements
 
@@ -30,8 +30,10 @@ cd hermes-desktop-plugins
 ```
 
 `install.sh` copies the plugins into the app's `desktop-plugins/` folder, copies
-the two gateway scripts into `$HERMES_HOME/scripts/`, and rewrites the script
-paths inside the plugins to match your gateway home.
+the three gateway scripts into `$HERMES_HOME/scripts/`, rewrites the script
+paths inside the plugins to match your gateway home, and (when `config.yaml`
+exists and `hermes` is on PATH) sets `terminal.env.HERMES_DEV_CREDITS=1` so the
+billed-spend row appears in `session-usage`.
 
 Where the plugin folder lives: **on the machine running the app**, not the
 gateway.

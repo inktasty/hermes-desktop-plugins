@@ -42,10 +42,12 @@ import { jsx, jsxs } from 'react/jsx-runtime'
 const ID = 'opencode-usage'
 const ROUTE = '/opencode-go'
 const POLL_MS = 60000
+const MODELS_TTL_MS = 6 * 3600000
 const TICK_MS = 1000
 // `install.sh` sets the SCRIPTS_DIR constant below to this gateway's scripts path.
 const SCRIPT_NAME = 'opencode_go_usage.py'
-const SCRIPTS_DIR = '__HERMES_SCRIPTS__'
+const MODELS_SCRIPT = 'opencode_go_models.py'
+const SCRIPTS_DIR = '/home/ubuntu/.hermes/scripts'
 const PY_CANDIDATES = ['python3', 'python', 'py -3']
 const CONSOLE_URL = 'https://opencode.ai/workspace'
 const WINDOW_ORDER = ['rolling', 'weekly', 'monthly']
@@ -58,7 +60,13 @@ const $updatedAt = atom(null)   // ms epoch of the last GOOD fetch
 const $loading = atom(false)
 const $now = atom(Date.now())   // ticking clock for countdowns
 
+const $models = atom(null)      // parsed JSON models payload
+const $modelsError = atom(null) // last models failure text | null
+const $modelsAt = atom(null)    // ms epoch of the last GOOD models fetch
+const $modelsLoading = atom(false)
+
 let refresh = async () => {}
+let refreshModels = async () => {}
 
 // ---- formatting ------------------------------------------------------------
 
@@ -134,6 +142,48 @@ function parseSnapshot(stdout) {
 function windowList(snap) {
   if (!snap || !snap.windows) return []
   return WINDOW_ORDER.map(key => snap.windows[key]).filter(Boolean)
+}
+
+// Money in a table: keep the digits that matter, and never a bare '$0.6' where the
+// neighbours carry two decimals ('$0.60' next to '$4.40').
+function trimMoney(text) {
+  const parts = String(text).split('.')
+  if (parts.length !== 2) return String(text)
+  const kept = parts[1].replace(/0+$/, '')
+  return parts[0] + '.' + (kept.length >= 2 ? kept : parts[1].slice(0, 2))
+}
+
+function fmtUsd(d) {
+  if (!Number.isFinite(d)) return null
+  if (d === 0) return '$0'
+  if (d < 0.01) return '$' + String(Number(d.toFixed(6)))
+  if (d < 1) return '$' + trimMoney(d.toFixed(3))
+  return '$' + d.toFixed(2)
+}
+
+// Monthly caps are whole dollars in the docs ('$60', not '$60.00').
+function fmtCap(d) {
+  if (!Number.isFinite(d)) return null
+  return Number.isInteger(d) ? '$' + String(d) : '$' + d.toFixed(2)
+}
+
+function fmtInt(n) {
+  if (!Number.isFinite(n)) return null
+  return Math.round(n).toLocaleString()
+}
+
+function fmtAge(ms) {
+  const age = Date.now() - ms
+  if (age < 60000) return 'just now'
+  if (age < 3600000) return Math.floor(age / 60000) + 'm'
+  if (age < 86400000) return Math.floor(age / 3600000) + 'h'
+  return Math.floor(age / 86400000) + 'd'
+}
+
+// 'updated just now' reads; 'updated just now ago' does not.
+function ageText(verb, ms) {
+  const age = fmtAge(ms)
+  return age === 'just now' ? verb + ' just now' : verb + ' ' + age + ' ago'
 }
 
 // ---- UI pieces -------------------------------------------------------------
@@ -312,15 +362,181 @@ function WindowColumn({ win, now, first }) {
   })
 }
 
+function ModelsTable({ models, modelsAt, error }) {
+  if (!models || !models.models) return null
+  const payload = models
+  const list = payload.models || []
+  const capped = list.filter(m => m.monthly_usd != null)
+  const uncapped = list.filter(m => m.monthly_usd == null)
+
+  const gridTemplate = 'minmax(0, 1.6fr) 4rem 4rem 4rem 3.5rem 4.5rem'
+
+  function tierTitle(m) {
+    const tiers = (m.tiers || []).filter(t => t.label)
+    if (!tiers.length) return null
+    return tiers.map(t => {
+      const pieces = [fmtUsd(t.input) + ' in', fmtUsd(t.output) + ' out']
+      if (t.cache_read != null) pieces.push(fmtUsd(t.cache_read) + ' cache')
+      return t.label + ': ' + pieces.join(' / ')
+    }).join('; ')
+  }
+
+  function NameCell({ m }) {
+    const catalogTitle = m.price_source === 'catalog' ? 'Priced from the live catalog; not yet listed in the docs' : null
+    const tier = tierTitle(m)
+    const suffixes = []
+    if (m.price_source === 'catalog') suffixes.push({ char: '†', title: catalogTitle })
+    if (tier) suffixes.push({ char: '‡', title: tier })
+    return jsxs('div', {
+      className: 'flex min-w-0 items-center gap-1.5',
+      children: [
+        jsx('span', { className: 'truncate', title: m.name, children: m.name }),
+        m.promo
+          ? jsx(Badge, { variant: 'warn', size: 'xs', title: m.promo, children: m.promo })
+          : null,
+        suffixes.map((s, i) => jsx('span', { key: i, className: 'shrink-0 text-(--ui-text-quaternary)', title: s.title, children: s.char }))
+      ]
+    })
+  }
+
+  function RowCell({ children, right }) {
+    return jsx('div', {
+      className: cn('py-1 text-[0.6875rem]', right ? 'text-right tabular-nums' : 'text-(--ui-text-secondary)'),
+      children
+    })
+  }
+
+  const headerClass = 'border-b border-(--ui-stroke-secondary) py-1 text-[0.6255rem] font-medium tracking-wide text-(--ui-text-quaternary) uppercase'
+  const rowClass = 'border-b border-(--ui-stroke-tertiary)'
+
+  return jsxs('div', {
+    className: 'flex flex-col gap-3',
+    children: [
+      jsxs('div', {
+        className: 'flex items-center justify-between gap-3',
+        children: [
+          jsxs('div', {
+            className: 'flex items-baseline gap-2 text-[0.8125rem]',
+            children: [
+              jsx('span', { className: 'font-medium text-foreground', children: 'Models on Go' }),
+              jsx('span', { className: 'text-(--ui-text-quaternary)', children: payload.counts ? payload.counts.served : list.length }),
+              modelsAt ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-quaternary)', children: ageText('updated', modelsAt) }) : null
+            ]
+          }),
+          jsx(Button, {
+            variant: 'outline',
+            size: 'xs',
+            onClick: () => window.open(payload.docs_url, '_blank', 'noopener'),
+            children: 'Go docs'
+          })
+        ]
+      }),
+
+      (payload.promos || []).length
+        ? jsxs('div', {
+            className: 'flex flex-wrap gap-x-3 gap-y-1 text-[0.6875rem] text-(--ui-orange)',
+            children: payload.promos.map(p => {
+              const before = p.monthly_before_usd != null ? fmtCap(p.monthly_before_usd) : null
+              const after = p.monthly_usd != null ? fmtCap(p.monthly_usd) : null
+              return jsx('span', {
+                key: p.model_key,
+                children: p.name + ' — ' + p.label + (before && after ? ' (' + before + ' → ' + after + ' cap)' : '')
+              })
+            })
+          })
+        : null,
+
+      error
+        ? jsx('div', { className: 'text-[0.75rem] text-(--ui-red)', children: error })
+        : null,
+
+      jsxs('div', {
+        style: { display: 'grid', gridTemplateColumns: gridTemplate, gap: '0.5rem' },
+        children: [
+          jsx('div', { className: headerClass, children: 'Model' }),
+          jsx('div', { className: cn(headerClass, 'text-right'), children: 'In' }),
+          jsx('div', { className: cn(headerClass, 'text-right'), children: 'Out' }),
+          jsx('div', { className: cn(headerClass, 'text-right'), children: 'Cache' }),
+          jsx('div', { className: cn(headerClass, 'text-right'), children: 'Cap' }),
+          jsx('div', { className: cn(headerClass, 'text-right'), children: '≈ Req/mo' }),
+
+          capped.map(m => jsxs('div', {
+            key: m.id,
+            className: cn(rowClass, 'contents'),
+            children: [
+              jsx('div', { className: 'py-1', children: jsx(NameCell, { m }) }),
+              jsx(RowCell, { right: true, children: fmtUsd(m.input) || '—' }),
+              jsx(RowCell, { right: true, children: fmtUsd(m.output) || '—' }),
+              jsx(RowCell, { right: true, children: fmtUsd(m.cache_read) || '—' }),
+              jsx(RowCell, { right: true, children: fmtCap(m.monthly_usd) || '—' }),
+              jsx(RowCell, { right: true, children: fmtInt(m.req_month) || '—' })
+            ]
+          })),
+
+          uncapped.length
+            ? jsxs('div', {
+                className: cn(rowClass, 'col-span-6 py-1.5 text-[0.6875rem] text-(--ui-text-secondary)'),
+                children: 'Also served by Go, no published cap'
+              })
+            : null,
+          uncapped.map(m => jsxs('div', {
+            key: m.id,
+            className: cn(rowClass, 'contents'),
+            children: [
+              jsx('div', { className: 'py-1', children: jsx(NameCell, { m }) }),
+              jsx(RowCell, { right: true, children: fmtUsd(m.input) || '—' }),
+              jsx(RowCell, { right: true, children: fmtUsd(m.output) || '—' }),
+              jsx(RowCell, { right: true, children: fmtUsd(m.cache_read) || '—' }),
+              jsx(RowCell, { right: true, children: '—' }),
+              jsx(RowCell, { right: true, children: fmtInt(m.req_month) || '—' })
+            ]
+          }))
+        ]
+      }),
+
+      (payload.plan && payload.plan.notes && payload.plan.notes.length)
+        ? jsxs('div', {
+            className: 'flex flex-col gap-1 text-[0.6875rem] text-(--ui-text-quaternary)',
+            children: payload.plan.notes.map((n, i) => jsxs('div', { key: i, children: [jsx('strong', { children: n.name + ':' }), ' ', n.text] }))
+          })
+        : null,
+
+      jsxs('div', {
+        className: 'flex flex-col gap-1 text-[0.625rem] text-(--ui-text-quaternary)',
+        children: [
+          jsx('div', {
+            children: 'Prices and caps from the OpenCode Go docs, cross-checked against the live catalog. '
+              + (payload.counts ? payload.counts.catalog_mismatch + ' of ' + payload.counts.served + ' prices differ.' : '')
+          }),
+          payload.plan && (payload.plan.five_hour_share != null || payload.plan.weekly_share != null)
+            ? jsx('div', {
+                children: 'Window share rules: '
+                  + (payload.plan.five_hour_share != null ? '5-hour = ' + Math.round(payload.plan.five_hour_share * 100) + '% of the monthly cap' : '')
+                  + (payload.plan.five_hour_share != null && payload.plan.weekly_share != null ? '; ' : '')
+                  + (payload.plan.weekly_share != null ? 'weekly = ' + Math.round(payload.plan.weekly_share * 100) + '%' : '')
+                  + '.'
+              })
+            : null,
+          modelsAt ? jsx('div', { children: 'Fetched at ' + new Date(modelsAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }) }) : null
+        ]
+      })
+    ]
+  })
+}
+
 function UsagePage() {
   const snap = useValue($snap)
   const error = useValue($error)
   const loading = useValue($loading)
   const updatedAt = useValue($updatedAt)
   const now = useValue($now)
+  const models = useValue($models)
+  const modelsError = useValue($modelsError)
+  const modelsAt = useValue($modelsAt)
 
   useEffect(() => {
     if (updatedAt == null || Date.now() - updatedAt > POLL_MS) void refresh()
+    if (modelsAt == null || Date.now() - modelsAt > MODELS_TTL_MS) void refreshModels()
   }, [])
 
   const windows = windowList(snap)
@@ -342,7 +558,7 @@ function UsagePage() {
         flagged
           ? 'Ahead of pace: ' + flagged.label + ' projects ' + flagged.projected_percent + '% by reset (est.)'
           : 'All windows inside their pace'
-      ].filter(Boolean).join(' \u00b7 ')
+      ].filter(Boolean).join(' · ')
     : null
 
   return jsxs('div', {
@@ -371,7 +587,10 @@ function UsagePage() {
             variant: 'secondary',
             size: 'xs',
             loading: loading,
-            onClick: () => void refresh(),
+            onClick: () => {
+              void refresh()
+              void refreshModels()
+            },
             children: 'Refresh'
           })
         ]
@@ -404,6 +623,8 @@ function UsagePage() {
                   className: 'text-[0.8125rem] text-(--ui-text-tertiary)',
                   children: loading ? 'Reading OpenCode Go usage...' : 'No usage data yet. Hit Refresh.'
                 }),
+
+          jsx(ModelsTable, { models, modelsAt, error: modelsError }),
 
           jsxs('div', {
             className: 'mt-auto flex flex-col gap-3 pt-1',
@@ -447,11 +668,11 @@ function UsageChip() {
   const tip = windows.length
     ? windows.map(w => {
         const at = parseMs(w.resets_at)
-        return w.label + ' ' + w.used_percent + '% \u00b7 resets in ' + (at == null ? '--' : fmtCountdown(at - now))
+        return w.label + ' ' + w.used_percent + '% · resets in ' + (at == null ? '--' : fmtCountdown(at - now))
       }).join('  |  ') + '   (click for the full page)'
     : error
       ? 'OpenCode Go usage unavailable: ' + error
-      : 'OpenCode Go usage \u2014 click to open'
+      : 'OpenCode Go usage — click to open'
 
   const chip = jsxs('button', {
     className: cn(
@@ -481,14 +702,14 @@ export default {
   id: ID, // must match the folder name
   name: 'OpenCode Go Usage',
   register(ctx) {
-    async function runUsageScript() {
+    async function runScript(scriptName) {
       if (SCRIPTS_DIR.startsWith('__HERMES')) {
         throw new Error('run install.sh on the gateway')
       }
       const cached = ctx.storage && typeof ctx.storage.get === 'function' ? ctx.storage.get('py_cmd') : null
       const candidates = cached && typeof cached === 'string' ? [cached] : PY_CANDIDATES
       let lastCode = null
-      const scriptPath = SCRIPTS_DIR + '/' + SCRIPT_NAME
+      const scriptPath = SCRIPTS_DIR + '/' + scriptName
       for (const py of candidates) {
         try {
           const resp = await host.request('shell.exec', { command: py + ' ' + scriptPath })
@@ -510,10 +731,16 @@ export default {
       throw new Error('no working python on the gateway shell (tried ' + tried + ')' + (lastCode != null ? '; exit ' + lastCode : '') + '; run install.sh on the gateway')
     }
 
+    const storedModels = ctx.storage && typeof ctx.storage.get === 'function' ? ctx.storage.get('models_v1') : null
+    if (storedModels && typeof storedModels === 'object' && storedModels.models) {
+      $models.set(storedModels)
+      $modelsAt.set(Date.now() - 60 * 1000) // treat restore as recent-ish
+    }
+
     refresh = async () => {
       $loading.set(true)
       try {
-        const snap = await runUsageScript()
+        const snap = await runScript(SCRIPT_NAME)
         if (snap.ok === false) {
           $error.set(String(snap.error || 'usage endpoint returned no data'))
           return
@@ -525,6 +752,28 @@ export default {
         $error.set('Gateway call failed: ' + (e && e.message ? e.message : String(e)))
       } finally {
         $loading.set(false)
+      }
+    }
+
+    refreshModels = async (force) => {
+      if (!force && $modelsAt.get() && Date.now() - $modelsAt.get() < MODELS_TTL_MS) return
+      $modelsLoading.set(true)
+      try {
+        const payload = await runScript(MODELS_SCRIPT)
+        if (payload.ok === false) {
+          $modelsError.set(String(payload.error || 'models endpoint returned no data'))
+          return
+        }
+        $models.set(payload)
+        $modelsAt.set(Date.now())
+        $modelsError.set(null)
+        if (ctx.storage && typeof ctx.storage.set === 'function') {
+          ctx.storage.set('models_v1', payload)
+        }
+      } catch (e) {
+        $modelsError.set('Gateway call failed: ' + (e && e.message ? e.message : String(e)))
+      } finally {
+        $modelsLoading.set(false)
       }
     }
 
@@ -568,7 +817,10 @@ export default {
           id: 'opencodeGo.refresh',
           label: 'OpenCode Go: Refresh usage now',
           keywords: ['opencode', 'go', 'usage', 'refresh', 'quota'],
-          run: () => void refresh()
+          run: () => {
+            void refresh()
+            void refreshModels(true)
+          }
         }
       }
     ])
