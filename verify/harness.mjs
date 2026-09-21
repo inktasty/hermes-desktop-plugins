@@ -61,6 +61,7 @@ function walk(node, out) {
     return
   }
   if (typeof type === 'string' || typeof type === 'symbol') {
+    if (props && typeof props.title === 'string' && props.title) out.titles.push(props.title)
     walk(props && props.children, out)
     return
   }
@@ -71,7 +72,7 @@ function render(Comp, props) {
   sdk.counts.useValue = 0
   let tree
   let err = null
-  const out = { err, prims: [], text: [] }
+  const out = { err, prims: [], text: [], titles: [] }
   try {
     tree = Comp(props || {})
     walk(tree, out)
@@ -235,7 +236,7 @@ function makeModelsPayload(now) {
     promos: [
       { model_key: 'promo-model', name: 'Promo Model', label: '4x · Ends Sep 27', monthly_usd: 60, monthly_before_usd: 15 }
     ],
-    counts: { served: 5, with_caps: 3, catalog_mismatch: 1, price_from_catalog: 1 },
+    counts: { served: 7, with_caps: 4, catalog_mismatch: 1, price_from_catalog: 2 },
     models: [
       {
         id: 'promo-model',
@@ -249,7 +250,10 @@ function makeModelsPayload(now) {
         price_source: 'docs',
         catalog: { input: 0.15, output: 0.6, cache_read: 0.003 },
         price_check: 'match',
-        tiers: []
+        tiers: [],
+        privacy: { training: 'not_used', retention: '0 days', zdr: true, note_key: null },
+        cap_source: 'docs',
+        announcement: null
       },
       {
         id: 'cap-no-promo',
@@ -263,7 +267,10 @@ function makeModelsPayload(now) {
         price_source: 'docs',
         catalog: { input: 1.4, output: 4.4, cache_read: 0.26 },
         price_check: 'match',
-        tiers: []
+        tiers: [],
+        privacy: { training: 'not_used', retention: '30 days', zdr: false, note_key: 'gpt-note' },
+        cap_source: 'docs',
+        announcement: null
       },
       {
         id: 'low-cap',
@@ -277,7 +284,32 @@ function makeModelsPayload(now) {
         price_source: 'docs',
         catalog: { input: 0.15, output: 0.6, cache_read: 0.003 },
         price_check: 'match',
-        tiers: [{ label: 'Peak', input: 0.3, output: 1.2, cache_read: 0.006, cache_write: null }]
+        tiers: [{ label: 'Peak', input: 0.3, output: 1.2, cache_read: 0.006, cache_write: null }],
+        privacy: { training: 'used', retention: 'Not ZDR', zdr: false, note_key: 'muse-note' },
+        cap_source: 'docs',
+        announcement: null
+      },
+      {
+        id: 'omen-alpha',
+        name: 'Omen Alpha',
+        input: 0.2, output: 0.66, cache_read: 0.04,
+        monthly_usd: 100, monthly_before_usd: null,
+        req_5h: null, req_week: null, req_month: null,
+        context: 500000,
+        promo: null,
+        in_docs: false,
+        price_source: 'catalog',
+        catalog: { input: 0.2, output: 0.66, cache_read: 0.04 },
+        price_check: null,
+        tiers: [],
+        privacy: null,
+        cap_source: 'announcement',
+        announcement: {
+          note: 'Go-only stealth model: $100 of usage on the $10 plan',
+          source: 'https://x.com/opencode/status/2095746098522452093',
+          date: '2026-09-04',
+          cap_usd: 100
+        }
       },
       {
         id: 'catalog-priced',
@@ -291,7 +323,10 @@ function makeModelsPayload(now) {
         price_source: 'catalog',
         catalog: { input: 0.2, output: 0.66, cache_read: 0.04 },
         price_check: null,
-        tiers: []
+        tiers: [],
+        privacy: null,
+        cap_source: null,
+        announcement: null
       },
       {
         id: 'tiered-model',
@@ -305,8 +340,54 @@ function makeModelsPayload(now) {
         price_source: 'docs',
         catalog: { input: 0.5, output: 3.0, cache_read: 0.05 },
         price_check: 'differs',
-        tiers: [{ label: '> 256K tokens', input: 2.0, output: 6.0, cache_read: 0.2, cache_write: 2.5 }]
+        tiers: [{ label: '> 256K tokens', input: 2.0, output: 6.0, cache_read: 0.2, cache_write: 2.5 }],
+        privacy: { training: 'not_used', retention: '0 days*', zdr: true, note_key: 'deep-note' },
+        cap_source: 'docs',
+        announcement: null
+      },
+      {
+        // Served, but nothing at all is published for it: no prices, no cap.
+        id: 'served-no-price',
+        name: 'Served No Price',
+        input: null, output: null, cache_read: null,
+        monthly_usd: null, monthly_before_usd: null,
+        req_5h: null, req_week: null, req_month: null,
+        context: null,
+        promo: null,
+        in_docs: false,
+        price_source: 'docs',
+        catalog: { input: null, output: null, cache_read: null },
+        price_check: null,
+        tiers: [],
+        privacy: null,
+        cap_source: null,
+        announcement: null
       }
+    ],
+    announcements: [
+      {
+        model_key: 'omen-alpha',
+        name: 'Omen Alpha',
+        note: 'Go-only stealth model: $100 of usage on the $10 plan',
+        source: 'https://x.com/opencode/status/2095746098522452093',
+        date: '2026-09-04',
+        cap_usd: 100
+      },
+      {
+        model_key: 'mimo-v2.6-flash',
+        name: 'MiMo-V2.6-Flash',
+        note: 'Free for one week',
+        source: 'https://x.com/opencode/status/2102145730999730611',
+        date: '2026-09-21',
+        cap_usd: null
+      }
+    ],
+    privacy_notes: [
+      { key: 'gpt-note', label: 'GPT Note', text: 'Abuse monitoring logs are kept for 30 days.' },
+      { key: 'muse-note', label: 'Muse Note', text: 'Training on your prompts is required for this price.' },
+      { key: 'deep-note', label: 'Deep Note', text: 'The ZDR agreement is renewed monthly.' },
+      // Referenced by no served model: it must not add a line under the table.
+      { key: 'orphan-note', label: 'Orphan Note', text: 'This footnote belongs to a model Go does not serve.' }
     ],
     docs_only: [],
     sources: { api: true, docs: true, catalog: true, catalog_age_s: 0 },
@@ -600,7 +681,7 @@ async function testSessionUsage() {
 // =========================================================== opencode-usage ==
 async function testOpencodeUsage() {
   console.log('--- opencode-usage')
-  const { bad, canonHash, localHash } = await loadPlugin('opencode-usage')
+  const { bad, canonHash, localHash, source } = await loadPlugin('opencode-usage')
   check('import scan clean', bad.length === 0, JSON.stringify(bad))
   check('copy byte-identical to canonical', canonHash === localHash)
 
@@ -655,13 +736,53 @@ async function testOpencodeUsage() {
 
   // Models table assertions
   check('page shows Models on Go header', /Models on Go/.test(pageOut.text), pageOut.text)
-  check('page shows served count', /Models on Go\s*5/.test(pageOut.text), 'want "Models on Go 5" got ' + pageOut.text)
+  check('page shows served count', /Models on Go\s*7/.test(pageOut.text), 'want "Models on Go 7" got ' + pageOut.text)
   check('page shows cap values', /\$60/.test(pageOut.text) && /\$15/.test(pageOut.text), pageOut.text)
   check('page shows promo badge label', /4x · Ends Sep 27/.test(pageOut.text), pageOut.text)
   check('page shows catalog-priced dagger', /†/.test(pageOut.text), pageOut.text)
-  check('page shows difference count', /1 of 5 prices differ/.test(pageOut.text), pageOut.text)
+  check('page shows difference count', /1 of 7 prices differ/.test(pageOut.text), pageOut.text)
   check('page shows uncapped group header', /Also served by Go, no published cap/.test(pageOut.text), pageOut.text)
   check('page shows plan notes', /Contributor Program:/.test(pageOut.text), pageOut.text)
+
+  // Layout (Part A)
+  check('grid is seven columns with a floor under the name column',
+    source.includes('minmax(11rem, 1.6fr) 4rem 4rem 4.5rem 3.5rem 4.5rem 3.5rem'))
+  check('model name no longer truncates', !/truncate/.test(source))
+  check('grid sits in an overflow-x-auto container', source.includes("'overflow-x-auto'"))
+  check('every column has a header cell', /Model\s+In\s+Out\s+Cache\s+Cap\s+≈ Req\/mo\s+ZDR/.test(pageOut.text), pageOut.text.slice(0, 700))
+
+  // ZDR column (Part B)
+  check('ZDR cell for a zero-retention model reads 0d', /\b0d\b/.test(pageOut.text), pageOut.text)
+  check('ZDR cell for a 30-day retention model reads 30d', /\b30d\b/.test(pageOut.text), pageOut.text)
+  check('ZDR cell for a non-ZDR model reads No', /\bNo 2\b/.test(pageOut.text), pageOut.text)
+  check('note markers are numbered in table order', /\b30d 1\b/.test(pageOut.text) && /\bNo 2\b/.test(pageOut.text) && /\b0d 3\b/.test(pageOut.text), pageOut.text)
+  check('a privacy-null ZDR cell is a dash that says why', pageOut.titles.includes('not listed in the docs privacy table'), JSON.stringify(pageOut.titles))
+  check('a zero-retention cell with no note explains itself', pageOut.titles.includes('zero data retention'), JSON.stringify(pageOut.titles))
+  check('referenced notes are listed under the table',
+    /1 GPT Note: Abuse monitoring logs are kept for 30 days\./.test(pageOut.text)
+    && /2 Muse Note: Training on your prompts is required for this price\./.test(pageOut.text)
+    && /3 Deep Note: The ZDR agreement is renewed monthly\./.test(pageOut.text), pageOut.text)
+  check('an unreferenced note adds no line', !/Orphan Note/.test(pageOut.text), pageOut.text)
+
+  // Announcements and announced caps (Part C)
+  check('announcement line names the model, the note and the date',
+    /Omen Alpha — Go-only stealth model: \$100 of usage on the \$10 plan \(announced 2026-09-04\)/.test(pageOut.text), pageOut.text)
+  check('announcement line carries the free-week note too',
+    /MiMo-V2\.6-Flash — Free for one week \(announced 2026-09-21\)/.test(pageOut.text), pageOut.text)
+  check('announcement spans title their source',
+    pageOut.titles.includes('https://x.com/opencode/status/2095746098522452093'), JSON.stringify(pageOut.titles))
+  check('an announced cap carries a superscript marker', /\$100 \*/.test(pageOut.text), pageOut.text)
+  check('an announced cap names its source in the title',
+    pageOut.titles.some(t => /Announced by OpenCode on X/.test(t) && t.includes('x.com/opencode')), JSON.stringify(pageOut.titles))
+  check('a docs-sourced cap carries no marker', !/\$60 \*/.test(pageOut.text), pageOut.text)
+
+  // Dashes (Part A.4 / A.6): an all-null row is named once instead of rendered.
+  check('an all-null served model gets no table row', (pageOut.text.match(/Served No Price/g) || []).length === 1, pageOut.text)
+  check('it is named once under the table', /Served, no published price: Served No Price/.test(pageOut.text), pageOut.text)
+  check('the unpriced line lists ids in its title', pageOut.titles.includes('served-no-price'), JSON.stringify(pageOut.titles))
+  check('no row renders as four or more dashes', !/(?:—\s+){3,}—/.test(pageOut.text), pageOut.text)
+  check('uncapped cap cells say no cap', /\bno cap\b/.test(pageOut.text), pageOut.text)
+  check('remaining dashes say what is missing', pageOut.titles.includes('not published for this model'), JSON.stringify(pageOut.titles))
 
   const counts = []
   for (const label of ['first', 'second', 'third']) {
@@ -762,6 +883,39 @@ async function testOpencodeUsage() {
   const winWantPct = snap.windows.rolling.used_percent + '/' + snap.windows.weekly.used_percent + '/' + snap.windows.monthly.used_percent + '%'
   check('Windows gateway: chip shows real value after python3 fails', winChipOut.text.includes(winWantPct), 'want ' + winWantPct + ' got ' + winChipOut.text)
   check('Windows gateway: working interpreter is cached', stored.py_cmd === 'python', 'stored=' + stored.py_cmd)
+
+  // Freshness (Part D): the header's age and the footer's stamp both come from the
+  // payload's own fetched_at. A payload restored from ctx.storage is whatever age it
+  // says it is -- a two-hour-old cache must never report 'just now'.
+  const freshMod = (await loadPlugin('opencode-usage', { fresh: 3, scriptsDir: '/tmp/hdp-test/scripts' })).mod
+  const stalePayload = makeModelsPayload(Date.now() - 2 * 3600000)
+  const restored = { models_v1: stalePayload }
+  const { ctx: freshCtx, contributions: freshContributions } = captureCtx()
+  freshCtx.storage = {
+    get: (k, f) => (k in restored ? restored[k] : f),
+    set: (k, v) => { restored[k] = v },
+    remove: k => { delete restored[k] }
+  }
+  sdk.setRpc(async (method, params) => {
+    if (method === 'shell.exec') {
+      const cmd = String(params && params.command || '')
+      if (cmd.includes('opencode_go_models.py')) return { stdout: packPayload(stalePayload), stderr: '', code: 0 }
+      if (cmd.includes('opencode_go_usage.py')) return { stdout: JSON.stringify(snap), stderr: '', code: 0 }
+    }
+    return {}
+  })
+  stubTimers()
+  freshMod.register(freshCtx)
+  restoreTimers()
+  await settle(20)
+  const freshPage = freshContributions.find(c => c.area === 'routes')
+  const freshOut = render(freshPage.render)
+  const freshIndex = freshOut.text.indexOf('Models on Go')
+  const freshText = freshIndex < 0 ? freshOut.text : freshOut.text.slice(freshIndex)
+  check('restored cache renders without error', !freshOut.err, freshOut.err && freshOut.err.message)
+  check('restored cache reports its real age, not the restore time', /updated 2h ago/.test(freshText), freshText.slice(0, 400))
+  check('restored cache never says just now', !/just now/.test(freshText), freshText.slice(0, 400))
+  check('the footer stamp comes from fetched_at', /Fetched at/.test(freshText), freshText.slice(0, 400))
   Date.now = realNow
 }
 
