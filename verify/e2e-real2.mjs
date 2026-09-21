@@ -82,7 +82,19 @@ console.log('CHIP:', chipOut.text)
 const out = render(page.render)
 const table = out.text.match(/Models on Go.{0,700}/)
 console.log('\nTABLE:', table ? table[0] : '(no table)')
-console.log('\nVERDICT:', /Models on Go/.test(out.text) ? 'table rendered' : 'models section rendered NOTHING')
+
+// The two things this render must prove against the real script: a ZDR column
+// exists, and an OpenCode announcement (with no docs row behind it) is named.
+const zdrHeader = /Model\s+In\s+Out\s+Cache\s+Cap\s+≈ Req\/mo\s+ZDR/.test(out.text)
+const zdrCells = { zero: (out.text.match(/\b0d\b/g) || []).length, thirty: (out.text.match(/\b30d\b/g) || []).length, no: (out.text.match(/\bNo\b/g) || []).length }
+const announcement = /Omen Alpha — Go-only stealth model: \$100 of usage on the \$10 plan \(announced 2026-09-04\)/.test(out.text)
+console.log('ZDR column header:', zdrHeader, JSON.stringify(zdrCells))
+console.log('Omen Alpha announcement:', announcement)
+console.log('all-null model named under the table:', /Served, no published price: /.test(out.text))
+const ok = /Models on Go/.test(out.text) && zdrHeader && announcement
+console.log('\nVERDICT:', ok
+  ? 'table rendered'
+  : 'models section missing the ZDR column or the Omen Alpha announcement')
 
 globalThis.setInterval = realSetInterval
-process.exit(0)
+process.exit(ok ? 0 : 1)

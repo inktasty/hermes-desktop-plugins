@@ -52,6 +52,12 @@ const PY_CANDIDATES = ['python3', 'python', 'py -3']
 const CONSOLE_URL = 'https://opencode.ai/workspace'
 const WINDOW_ORDER = ['rolling', 'weekly', 'monthly']
 
+// Table placeholders. Every '—' carries a title saying what is missing, so a dash
+// is never a dead end.
+const DASH = '—'
+const NOT_PUBLISHED = 'not published for this model'
+const ZDR_TEXT = { '30 days': '30d', 'Not ZDR': 'No' }
+
 // ---- state -----------------------------------------------------------------
 
 const $snap = atom(null)        // parsed JSON snapshot from the gateway script
@@ -378,7 +384,7 @@ function WindowColumn({ win, now, first }) {
   })
 }
 
-function ModelsTable({ models, modelsAt, error }) {
+function ModelsTable({ models, error }) {
   const payload = models && models.models ? models : null
   if (!payload) {
     // Never leave the space silently blank: an empty area with no explanation is
@@ -398,10 +404,31 @@ function ModelsTable({ models, modelsAt, error }) {
     })
   }
   const list = payload.models || []
+  // A served model with nothing published at all (no prices and no cap) would
+  // render as a row of dashes; name it once under the table instead.
+  const hasPrice = m => m.input != null || m.output != null || m.cache_read != null || m.monthly_usd != null
   const capped = list.filter(m => m.monthly_usd != null)
-  const uncapped = list.filter(m => m.monthly_usd == null)
+  const uncapped = list.filter(m => m.monthly_usd == null && hasPrice(m))
+  const unpriced = list.filter(m => m.monthly_usd == null && !hasPrice(m))
+  // Both the header's age and the footer's stamp come from the payload itself,
+  // so a list restored from storage reports its real age and not the restore time.
+  const fetchedMs = parseMs(payload.fetched_at)
 
-  const gridTemplate = 'minmax(0, 1.6fr) 4rem 4rem 4rem 3.5rem 4.5rem'
+  const gridTemplate = 'minmax(11rem, 1.6fr) 4rem 4rem 4.5rem 3.5rem 4.5rem 3.5rem'
+
+  // The docs' privacy footnotes, numbered in the order the models first appear
+  // top to bottom. A note no rendered model references never gets a line.
+  const notesByKey = new Map((payload.privacy_notes || []).map(n => [n.key, n]))
+  const noteIndex = new Map()
+  const noteLines = []
+  for (const m of capped.concat(uncapped)) {
+    const key = m.privacy && m.privacy.note_key
+    if (!key || noteIndex.has(key)) continue
+    const note = notesByKey.get(key)
+    if (!note) continue
+    noteIndex.set(key, noteLines.length + 1)
+    noteLines.push(note)
+  }
 
   function tierTitle(m) {
     const tiers = (m.tiers || []).filter(t => t.label)
@@ -422,7 +449,7 @@ function ModelsTable({ models, modelsAt, error }) {
     return jsxs('div', {
       className: 'flex min-w-0 items-center gap-1.5',
       children: [
-        jsx('span', { className: 'truncate', title: m.name, children: m.name }),
+        jsx('span', { className: 'whitespace-nowrap', title: m.name, children: m.name }),
         m.promo
           ? jsx(Badge, { variant: 'warn', size: 'xs', title: m.promo, children: m.promo })
           : null,
@@ -431,10 +458,76 @@ function ModelsTable({ models, modelsAt, error }) {
     })
   }
 
-  function RowCell({ children, right }) {
-    return jsx('div', {
+  function RowCell({ children, right, title }) {
+    const props = {
       className: cn('py-1 text-[0.6875rem]', right ? 'text-right tabular-nums' : 'text-(--ui-text-secondary)'),
       children
+    }
+    if (title) props.title = title
+    return jsx('div', props)
+  }
+
+  // Money and request counts: a dash always says what is missing.
+  function moneyCell(d) {
+    const text = fmtUsd(d)
+    return text == null ? { right: true, title: NOT_PUBLISHED, children: DASH } : { right: true, children: text }
+  }
+
+  function reqCell(d) {
+    const text = fmtInt(d)
+    return text == null ? { right: true, title: NOT_PUBLISHED, children: DASH } : { right: true, children: text }
+  }
+
+  function superMark(text) {
+    return jsx('span', { className: 'align-super text-[0.5rem]', children: text })
+  }
+
+  // Cap: 'no cap' when the docs publish none, a superscript star when the number
+  // comes from an OpenCode announcement rather than the docs.
+  function capCell(m) {
+    if (m.monthly_usd == null) {
+      return { right: true, children: jsx('span', { className: 'text-(--ui-text-quaternary)', children: 'no cap' }) }
+    }
+    if (m.cap_source === 'announcement') {
+      const source = (m.announcement && m.announcement.source) || ''
+      return {
+        right: true,
+        title: 'Announced by OpenCode on X, not in the docs' + (source ? ': ' + source : ''),
+        children: [fmtCap(m.monthly_usd), superMark('*')]
+      }
+    }
+    return { right: true, children: fmtCap(m.monthly_usd) }
+  }
+
+  // ZDR: 0d for zero retention, the retention window compacted otherwise, a dash
+  // (with its reason) when the docs privacy table does not list the model.
+  function zdrCell(m) {
+    const privacy = m.privacy
+    if (!privacy) {
+      return { right: true, title: 'not listed in the docs privacy table', children: DASH }
+    }
+    const index = privacy.note_key ? noteIndex.get(privacy.note_key) : null
+    const note = index ? notesByKey.get(privacy.note_key) : null
+    const text = privacy.zdr ? '0d' : (ZDR_TEXT[privacy.retention] || privacy.retention)
+    const props = { right: true, children: note ? [text, superMark(String(index))] : text }
+    if (note) props.title = note.text
+    else if (privacy.zdr) props.title = 'zero data retention'
+    return props
+  }
+
+  function modelRow(m) {
+    return jsxs('div', {
+      key: m.id,
+      className: cn(rowClass, 'contents'),
+      children: [
+        jsx('div', { className: 'py-1', children: jsx(NameCell, { m }) }),
+        jsx(RowCell, moneyCell(m.input)),
+        jsx(RowCell, moneyCell(m.output)),
+        jsx(RowCell, moneyCell(m.cache_read)),
+        jsx(RowCell, capCell(m)),
+        jsx(RowCell, reqCell(m.req_month)),
+        jsx(RowCell, zdrCell(m))
+      ]
     })
   }
 
@@ -452,7 +545,7 @@ function ModelsTable({ models, modelsAt, error }) {
             children: [
               jsx('span', { className: 'font-medium text-foreground', children: 'Models on Go' }),
               jsx('span', { className: 'text-(--ui-text-quaternary)', children: payload.counts ? payload.counts.served : list.length }),
-              modelsAt ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-quaternary)', children: ageText('updated', modelsAt) }) : null
+              fetchedMs ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-quaternary)', children: ageText('updated', fetchedMs) }) : null
             ]
           }),
           jsx(Button, {
@@ -478,53 +571,63 @@ function ModelsTable({ models, modelsAt, error }) {
           })
         : null,
 
+      (payload.announcements || []).length
+        ? jsxs('div', {
+            className: 'flex flex-wrap gap-x-3 gap-y-1 text-[0.6875rem] text-(--ui-orange)',
+            children: payload.announcements.map(a => jsx('span', {
+              key: a.model_key,
+              title: a.source,
+              className: 'cursor-pointer hover:underline',
+              onClick: () => window.open(a.source, '_blank', 'noopener'),
+              children: a.name + ' — ' + a.note + ' (announced ' + a.date + ')'
+            }))
+          })
+        : null,
+
       error
         ? jsx('div', { className: 'text-[0.75rem] text-(--ui-red)', children: error })
         : null,
 
-      jsxs('div', {
-        style: { display: 'grid', gridTemplateColumns: gridTemplate, gap: '0.5rem' },
-        children: [
-          jsx('div', { className: headerClass, children: 'Model' }),
-          jsx('div', { className: cn(headerClass, 'text-right'), children: 'In' }),
-          jsx('div', { className: cn(headerClass, 'text-right'), children: 'Out' }),
-          jsx('div', { className: cn(headerClass, 'text-right'), children: 'Cache' }),
-          jsx('div', { className: cn(headerClass, 'text-right'), children: 'Cap' }),
-          jsx('div', { className: cn(headerClass, 'text-right'), children: '≈ Req/mo' }),
+      jsx('div', {
+        className: 'overflow-x-auto',
+        children: jsxs('div', {
+          style: { display: 'grid', gridTemplateColumns: gridTemplate, gap: '0.5rem' },
+          children: [
+            jsx('div', { className: headerClass, children: 'Model' }),
+            jsx('div', { className: cn(headerClass, 'text-right'), children: 'In' }),
+            jsx('div', { className: cn(headerClass, 'text-right'), children: 'Out' }),
+            jsx('div', { className: cn(headerClass, 'text-right'), children: 'Cache' }),
+            jsx('div', { className: cn(headerClass, 'text-right'), children: 'Cap' }),
+            jsx('div', { className: cn(headerClass, 'text-right'), children: '≈ Req/mo' }),
+            jsx('div', { className: cn(headerClass, 'text-right'), children: 'ZDR' }),
 
-          capped.map(m => jsxs('div', {
-            key: m.id,
-            className: cn(rowClass, 'contents'),
-            children: [
-              jsx('div', { className: 'py-1', children: jsx(NameCell, { m }) }),
-              jsx(RowCell, { right: true, children: fmtUsd(m.input) || '—' }),
-              jsx(RowCell, { right: true, children: fmtUsd(m.output) || '—' }),
-              jsx(RowCell, { right: true, children: fmtUsd(m.cache_read) || '—' }),
-              jsx(RowCell, { right: true, children: fmtCap(m.monthly_usd) || '—' }),
-              jsx(RowCell, { right: true, children: fmtInt(m.req_month) || '—' })
-            ]
-          })),
+            capped.map(modelRow),
 
-          uncapped.length
-            ? jsxs('div', {
-                className: cn(rowClass, 'col-span-6 py-1.5 text-[0.6875rem] text-(--ui-text-secondary)'),
-                children: 'Also served by Go, no published cap'
-              })
-            : null,
-          uncapped.map(m => jsxs('div', {
-            key: m.id,
-            className: cn(rowClass, 'contents'),
-            children: [
-              jsx('div', { className: 'py-1', children: jsx(NameCell, { m }) }),
-              jsx(RowCell, { right: true, children: fmtUsd(m.input) || '—' }),
-              jsx(RowCell, { right: true, children: fmtUsd(m.output) || '—' }),
-              jsx(RowCell, { right: true, children: fmtUsd(m.cache_read) || '—' }),
-              jsx(RowCell, { right: true, children: '—' }),
-              jsx(RowCell, { right: true, children: fmtInt(m.req_month) || '—' })
-            ]
-          }))
-        ]
+            uncapped.length
+              ? jsx('div', {
+                  className: 'col-span-7 border-b border-(--ui-stroke-secondary) py-1.5 text-[0.625rem] font-medium tracking-wide text-(--ui-text-quaternary) uppercase',
+                  children: 'Also served by Go, no published cap'
+                })
+              : null,
+            uncapped.map(modelRow)
+          ]
+        })
       }),
+
+      unpriced.length
+        ? jsx('div', {
+            className: 'text-[0.6875rem] text-(--ui-text-quaternary)',
+            title: unpriced.map(m => m.id).join(', '),
+            children: 'Served, no published price: ' + unpriced.map(m => m.name).join(', ')
+          })
+        : null,
+
+      noteLines.length
+        ? jsx('div', {
+            className: 'flex flex-col gap-1 text-[0.6875rem] text-(--ui-text-quaternary)',
+            children: noteLines.map((n, i) => jsx('div', { key: n.key, children: (i + 1) + ' ' + n.label + ': ' + n.text }))
+          })
+        : null,
 
       (payload.plan && payload.plan.notes && payload.plan.notes.length)
         ? jsxs('div', {
@@ -549,7 +652,7 @@ function ModelsTable({ models, modelsAt, error }) {
                   + '.'
               })
             : null,
-          modelsAt ? jsx('div', { children: 'Fetched at ' + new Date(modelsAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }) }) : null
+          fetchedMs ? jsx('div', { children: 'Fetched at ' + new Date(fetchedMs).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }) }) : null
         ]
       })
     ]
@@ -656,7 +759,7 @@ function UsagePage() {
                   children: loading ? 'Reading OpenCode Go usage...' : 'No usage data yet. Hit Refresh.'
                 }),
 
-          jsx(ModelsTable, { models, modelsAt, error: modelsError }),
+          jsx(ModelsTable, { models, error: modelsError }),
 
           jsxs('div', {
             className: 'mt-auto flex flex-col gap-3 pt-1',
@@ -771,7 +874,9 @@ export default {
     const storedModels = ctx.storage && typeof ctx.storage.get === 'function' ? ctx.storage.get('models_v1') : null
     if (storedModels && typeof storedModels === 'object' && storedModels.models) {
       $models.set(storedModels)
-      $modelsAt.set(Date.now() - 60 * 1000) // treat restore as recent-ish
+      // Refetch guard only: the table's 'updated <age>' and 'Fetched at' lines read
+      // the payload's own fetched_at, so a restored list shows its real age.
+      $modelsAt.set(Date.now() - 60 * 1000)
     }
 
     refresh = async () => {
