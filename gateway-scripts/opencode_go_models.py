@@ -15,6 +15,8 @@ Never prints credentials. Always prints parseable JSON, even on partial failure.
 Stdlib only. Usage:  python3 opencode_go_models.py
 """
 
+import base64
+import gzip
 import json
 import os
 import re
@@ -37,6 +39,8 @@ HTTP_TIMEOUT = 25
 # opencode.ai answers 403 to a default Python-urllib user agent (verified 2026-09-21),
 # and the docs ask clients to identify themselves, so send a real name.
 USER_AGENT = "hermes-desktop-plugin/1.0 (+https://hermes-agent.nousresearch.com)"
+# shell.exec returns only the last 4000 chars of stdout; stay well under it.
+STDOUT_PLAIN_LIMIT = 3500
 
 TAG_RE = re.compile(r"<[^>]+>")
 SMALL_RE = re.compile(r"<small>(.*?)</small>", re.S)
@@ -430,6 +434,22 @@ def sort_models(records):
     return sorted(records, key=key)
 
 
+def emit(payload):
+    """One line of JSON on stdout, small enough to survive the gateway.
+
+    `shell.exec` hands the renderer only the LAST 4000 characters of stdout
+    (tui_gateway/methods_tools.py), and the full catalog is ~13 KB, so a large
+    payload travels gzipped and base64-encoded as {"ok":...,"gzip":"..."} and the
+    plugin inflates it. Small payloads stay plain JSON, which keeps the script
+    usable straight from a terminal.
+    """
+    line = json.dumps(payload, separators=(",", ":"))
+    if len(line) <= STDOUT_PLAIN_LIMIT:
+        return line
+    packed = base64.b64encode(gzip.compress(line.encode("utf-8"), 9, mtime=0)).decode("ascii")
+    return json.dumps({"ok": payload.get("ok"), "gzip": packed}, separators=(",", ":"))
+
+
 def main():
     errors = []
     ids, base, api_error = api_models()
@@ -467,7 +487,7 @@ def main():
     ]
 
     ok = bool(records)
-    print(json.dumps({
+    payload = {
         "ok": ok,
         "error": None if ok else (errors[0] if errors else "no model data"),
         "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -490,7 +510,8 @@ def main():
             "catalog_age_s": round(catalog_age, 1) if catalog_age is not None else None,
         },
         "errors": errors,
-    }))
+    }
+    print(emit(payload))
 
 
 if __name__ == "__main__":
