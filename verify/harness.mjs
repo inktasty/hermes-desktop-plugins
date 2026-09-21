@@ -479,9 +479,10 @@ async function testSessionUsage() {
   const pop = primOf(out, 'PopoverContent')[0]
   check('panel lists input/output/cost rows', pop && /Input tokens/.test(out.text) && /Session cost/.test(out.text), out.text)
 
-  // Per-1M rate row
-  check('panel shows Per 1M rate row', /Per 1M: in\/out\/cache/.test(out.text), out.text)
-  check('panel rate row has the three off-peak amounts', /Per 1M: in\/out\/cache \$0\.15 \/ \$0\.6[0]? \/ \$0\.003/.test(out.text), out.text)
+  // Per-1M rates block: caption line plus one data line of label/value pairs
+  check('panel shows the rates block caption', /Rates per 1M tokens/.test(out.text), out.text)
+  check('panel rate line has the three labelled off-peak amounts', /in \$0\.15 out \$0\.60 cache \$0\.003/.test(out.text), out.text)
+  check('rates block is not one crowded label/value row', !/Per 1M: in\/out\/cache/.test(out.text), out.text)
 
   // Peak card in force: move the clock, re-fetch (which re-prices the live
   // session at the new card) and re-render.
@@ -490,8 +491,8 @@ async function testSessionUsage() {
   sdk.host.state.focusedUsage.set(USAGE)
   await settle()
   const peakOut = render(chip.render)
-  check('peak panel shows Peak per 1M row', /Peak per 1M: in\/out\/cache/.test(peakOut.text), peakOut.text)
-  check('peak panel doubles all three rates', /Peak per 1M: in\/out\/cache \$0\.3[0-9]? \/ \$1\.20 \/ \$0\.006/.test(peakOut.text), peakOut.text)
+  check('peak panel labels the block as peak rates', /Peak rates per 1M tokens/.test(peakOut.text), peakOut.text)
+  check('peak panel doubles all three rates', /in \$0\.3[0-9]? out \$1\.20 cache \$0\.006/.test(peakOut.text), peakOut.text)
   // Empty-state branch still shows the rate row when rates are loaded
   sdk.host.state.focusedUsage.set(null)
   sdk.host.state.focusedSessionId.set('sess-empty')
@@ -507,7 +508,21 @@ async function testSessionUsage() {
   const emptyRates = { input: 0.15, output: 0.6, cache_read: 0.003, provider: 'opencode-go', model: 'deepseek-v4.1-flash' }
   const emptyOut = render(mod.SessionPanel, { u: {}, est: null, error: null, rates: emptyRates })
   check('empty-state panel shows no-turns message', /No turns yet/.test(emptyOut.text), emptyOut.text)
-  check('empty-state panel shows rate row', /Per 1M: in\/out\/cache/.test(emptyOut.text), emptyOut.text)
+  check('empty-state panel shows rate block', /Rates per 1M tokens/.test(emptyOut.text), emptyOut.text)
+
+  // Chip-level empty + rates-loaded state must not duplicate the head/empty lines.
+  sdk.host.state.focusedSessionId.set('sess-empty')
+  sdk.host.state.focusedUsage.set(null)
+  sdk.setRpc(async (method, params) => {
+    if (method === 'session.usage') return { model: 'deepseek-v4.1-flash' }
+    if (method === 'shell.exec') return { stdout: priceLine + '\n', stderr: '', code: 0 }
+    return {}
+  })
+  if (typeof fetchOnce === 'function') await fetchOnce()
+  await settle()
+  const chipEmptyOut = render(chip.render)
+  check('chip empty-state popover has no duplicated This session line', !/This session\s+This session/.test(chipEmptyOut.text), chipEmptyOut.text)
+  check('chip empty-state popover has no duplicated No turns line', !/No turns yet in this session\s+No turns yet in this session/.test(chipEmptyOut.text), chipEmptyOut.text)
 
   // hook-count oracle across transitions
   const counts = []
@@ -630,7 +645,7 @@ async function testOpencodeUsage() {
 
   // Models table assertions
   check('page shows Models on Go header', /Models on Go/.test(pageOut.text), pageOut.text)
-  check('page shows served count', pageOut.text.includes('5'), 'want 5 got ' + pageOut.text)
+  check('page shows served count', /Models on Go\s*5/.test(pageOut.text), 'want "Models on Go 5" got ' + pageOut.text)
   check('page shows cap values', /\$60/.test(pageOut.text) && /\$15/.test(pageOut.text), pageOut.text)
   check('page shows promo badge label', /4x · Ends Sep 27/.test(pageOut.text), pageOut.text)
   check('page shows catalog-priced dagger', /†/.test(pageOut.text), pageOut.text)

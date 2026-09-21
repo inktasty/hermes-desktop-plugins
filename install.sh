@@ -86,8 +86,12 @@ if [ -f "$CONFIG_FILE" ]; then
     cp "$CONFIG_FILE" "$BACKUP"
     echo "backed up config.yaml -> $BACKUP"
     if command -v hermes >/dev/null 2>&1; then
-      hermes config set terminal.env.HERMES_DEV_CREDITS 1
-      echo "set terminal.env.HERMES_DEV_CREDITS = 1 via hermes config"
+      if hermes config set terminal.env.HERMES_DEV_CREDITS 1; then
+        echo "set terminal.env.HERMES_DEV_CREDITS = 1 via hermes config"
+      else
+        echo "hermes config set failed; set it yourself with:"
+        echo "  hermes config set terminal.env.HERMES_DEV_CREDITS 1"
+      fi
     else
       echo "hermes CLI not on PATH; set it yourself with:"
       echo "  hermes config set terminal.env.HERMES_DEV_CREDITS 1"
