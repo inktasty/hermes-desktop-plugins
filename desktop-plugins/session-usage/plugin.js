@@ -228,13 +228,35 @@ function fmtRateAmount(n) {
   return '$' + n.toFixed(2)
 }
 
-function formatRatesRow(card, peak) {
-  return (peak ? 'Peak per 1M: in/out/cache ' : 'Per 1M: in/out/cache ')
-    + [card.input, card.output, card.cacheRead].map(fmtRateAmount).join(' / ')
-}
-
-function rateRowValue(card) {
-  return [card.input, card.output, card.cacheRead].map(fmtRateAmount).join(' / ')
+// Rates read as a small reference block: one muted caption line, one data line of
+// label/value pairs. Three prices never crowd a single label/value row this way,
+// and each number keeps its own label instead of relying on the caption's order.
+function RateBlock({ card, peak }) {
+  const cells = [
+    ['in', card.input],
+    ['out', card.output],
+    ['cache', card.cacheRead]
+  ]
+  return jsx('div', {
+    className: 'space-y-1 pt-0.5',
+    children: [
+      jsx('div', {
+        className: 'text-[10px] text-(--ui-text-quaternary)',
+        children: peak ? 'Peak rates per 1M tokens (2\u00d7)' : 'Rates per 1M tokens'
+      }),
+      jsx('div', {
+        className: 'flex items-baseline justify-between gap-2 text-[0.6875rem] tabular-nums',
+        children: cells.map(cell => jsx('span', {
+          key: cell[0],
+          className: 'flex items-baseline gap-1',
+          children: [
+            jsx('span', { className: 'text-(--ui-text-quaternary)', children: cell[0] }),
+            jsx('span', { className: 'text-foreground', children: fmtRateAmount(cell[1]) })
+          ]
+        }))
+      })
+    ]
+  })
 }
 
 function SessionPanel({ u, est, error, rates }) {
@@ -256,13 +278,7 @@ function SessionPanel({ u, est, error, rates }) {
   if (tot == null && !(u && u.calls) && !Number.isFinite(u && u.context_percent)) {
     kids.push(jsx('div', { key: 'empty', className: 'text-[11px] text-(--ui-text-tertiary)', children: 'No turns yet in this session' }))
     if (card) {
-      kids.push(
-        jsx(Row, {
-          key: 'rates',
-          label: peak ? 'Peak per 1M: in/out/cache' : 'Per 1M: in/out/cache',
-          value: rateRowValue(card)
-        })
-      )
+      kids.push(jsx(RateBlock, { key: 'rates', card, peak }))
     }
     return jsx('div', { className: 'space-y-1.5', children: kids })
   }
@@ -281,13 +297,7 @@ function SessionPanel({ u, est, error, rates }) {
     })
   )
   if (card) {
-    kids.push(
-      jsx(Row, {
-        key: 'rates',
-        label: peak ? 'Peak per 1M: in/out/cache' : 'Per 1M: in/out/cache',
-        value: rateRowValue(card)
-      })
-    )
+    kids.push(jsx(RateBlock, { key: 'rates', card, peak }))
   }
   if (u && Number.isFinite(u.context_percent)) kids.push(jsx(Row, { key: 'ctx', label: 'Context used', value: u.context_percent + '%' }))
   if (u && Number.isFinite(u.compressions) && u.compressions > 0) kids.push(jsx(Row, { key: 'comp', label: 'Compressions', value: String(u.compressions) }))
@@ -479,13 +489,7 @@ export default {
             align: 'end',
             sideOffset: 6,
             className: 'pointer-events-none w-[19rem] select-none',
-            children: hasSess
-              ? jsx(SessionPanel, { u, est, error: ratesErr, rates })
-              : jsx('div', { className: 'space-y-1.5' }, [
-                  jsx('div', { className: 'font-semibold text-foreground', children: 'This session' }),
-                  jsx('div', { className: 'text-[11px] text-(--ui-text-tertiary)', children: 'No turns yet in this session' }),
-                  rates ? jsx(SessionPanel, { u: {}, est: null, error: ratesErr, rates }) : null
-                ])
+            children: jsx(SessionPanel, { u, est, error: ratesErr, rates })
           })
         ]
       })

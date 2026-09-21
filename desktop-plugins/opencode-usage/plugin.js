@@ -47,7 +47,7 @@ const TICK_MS = 1000
 // `install.sh` sets the SCRIPTS_DIR constant below to this gateway's scripts path.
 const SCRIPT_NAME = 'opencode_go_usage.py'
 const MODELS_SCRIPT = 'opencode_go_models.py'
-const SCRIPTS_DIR = '/home/ubuntu/.hermes/scripts'
+const SCRIPTS_DIR = '__HERMES_SCRIPTS__'
 const PY_CANDIDATES = ['python3', 'python', 'py -3']
 const CONSOLE_URL = 'https://opencode.ai/workspace'
 const WINDOW_ORDER = ['rolling', 'weekly', 'monthly']
@@ -406,7 +406,7 @@ function ModelsTable({ models, modelsAt, error }) {
     })
   }
 
-  const headerClass = 'border-b border-(--ui-stroke-secondary) py-1 text-[0.6255rem] font-medium tracking-wide text-(--ui-text-quaternary) uppercase'
+  const headerClass = 'border-b border-(--ui-stroke-secondary) py-1 text-[0.625rem] font-medium tracking-wide text-(--ui-text-quaternary) uppercase'
   const rowClass = 'border-b border-(--ui-stroke-tertiary)'
 
   return jsxs('div', {
@@ -589,7 +589,7 @@ function UsagePage() {
             loading: loading,
             onClick: () => {
               void refresh()
-              void refreshModels()
+              void refreshModels(true)
             },
             children: 'Refresh'
           })
