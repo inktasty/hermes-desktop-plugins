@@ -70,13 +70,39 @@ done
 mkdir -p "$HERMES_HOME/scripts"
 cp "$HERE/gateway-scripts/model_price_lookup.py" "$HERMES_HOME/scripts/"
 cp "$HERE/gateway-scripts/opencode_go_usage.py" "$HERMES_HOME/scripts/"
-chmod +x "$HERMES_HOME/scripts/model_price_lookup.py" "$HERMES_HOME/scripts/opencode_go_usage.py"
+cp "$HERE/gateway-scripts/opencode_go_models.py" "$HERMES_HOME/scripts/"
+chmod +x "$HERMES_HOME/scripts/model_price_lookup.py" "$HERMES_HOME/scripts/opencode_go_usage.py" "$HERMES_HOME/scripts/opencode_go_models.py"
 echo "installed gateway scripts -> $HERMES_HOME/scripts"
+
+# Best-effort dev-credits config: exact billed spend only reaches the app when
+# the gateway runs with HERMES_DEV_CREDITS truthy.
+CONFIG_FILE="$HERMES_HOME/config.yaml"
+if [ -f "$CONFIG_FILE" ]; then
+  CURRENT=$(grep -E "^\s*HERMES_DEV_CREDITS\s*:" "$CONFIG_FILE" 2>/dev/null | tail -1 | sed -E 's/.*:\s*//' | tr '[:upper:]' '[:lower:]' || true)
+  if [ "$CURRENT" = "1" ] || [ "$CURRENT" = "true" ] || [ "$CURRENT" = "yes" ]; then
+    echo "HERMES_DEV_CREDITS already set ($CURRENT); leaving config.yaml unchanged"
+  else
+    BACKUP="$CONFIG_FILE.bak-dev-credits-$(date +%Y%m%d)"
+    cp "$CONFIG_FILE" "$BACKUP"
+    echo "backed up config.yaml -> $BACKUP"
+    if command -v hermes >/dev/null 2>&1; then
+      hermes config set terminal.env.HERMES_DEV_CREDITS 1
+      echo "set terminal.env.HERMES_DEV_CREDITS = 1 via hermes config"
+    else
+      echo "hermes CLI not on PATH; set it yourself with:"
+      echo "  hermes config set terminal.env.HERMES_DEV_CREDITS 1"
+    fi
+  fi
+else
+  echo "no $CONFIG_FILE found; skipping HERMES_DEV_CREDITS step"
+fi
 
 cat <<'DONE'
 
 Next:
   1. opencode-usage needs OPENCODE_GO_API_KEY in the gateway's .env
-  2. If the app was already running, run "Reload desktop plugins" (Ctrl+K / Cmd+K)
-  3. Check the app log for "[plugins] runtime load failed" if a chip is missing
+  2. session-usage's exact billed-spend row needs HERMES_DEV_CREDITS=1 in the
+     gateway config (install.sh sets it when config.yaml exists and hermes is on PATH)
+  3. If the app was already running, run "Reload desktop plugins" (Ctrl+K / Cmd+K)
+  4. Check the app log for "[plugins] runtime load failed" if a chip is missing
 DONE

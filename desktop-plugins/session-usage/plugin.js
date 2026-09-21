@@ -24,7 +24,7 @@ const ID = 'session-usage'
 const POLL_MS = 120000 // light poll; most updates arrive via the live stream
 // `install.sh` sets the SCRIPTS_DIR constant below to this gateway's scripts path.
 const SCRIPT_NAME = 'model_price_lookup.py'
-const SCRIPTS_DIR = '__HERMES_SCRIPTS__'
+const SCRIPTS_DIR = '/home/ubuntu/.hermes/scripts'
 const PY_CANDIDATES = ['python3', 'python', 'py -3']
 
 // Live atoms are resolved ONCE at import, each with a null-atom fallback: a
@@ -163,10 +163,11 @@ function accumulate(prev, u, rates, nowMs, sessionModel) {
   )
   const usd = (base.usd || 0) + deltaUsd
   if (!Number.isFinite(usd)) return prev || null
+  const tierApplies = peakApplies(rates.model, rates.provider)
   return {
     usd,
     peak,
-    tierApplies: peakApplies(rates.model, rates.provider),
+    tierApplies,
     priced: card.priced,
     provider: rates.provider,
     model: rates.model,
@@ -210,8 +211,36 @@ function Row({ label, value, strong }) {
   })
 }
 
-function SessionPanel({ u, est, error }) {
-  const billed = Number.isFinite(u.dev_credits_spent_micros)
+// Rates are small numbers: keep the digits that matter, and never a bare '$0.6'
+// where the neighbours carry two decimals ('$0.60' next to '$4.40').
+function trimMoney(text) {
+  const parts = String(text).split('.')
+  if (parts.length !== 2) return String(text)
+  const kept = parts[1].replace(/0+$/, '')
+  return parts[0] + '.' + (kept.length >= 2 ? kept : parts[1].slice(0, 2))
+}
+
+function fmtRateAmount(n) {
+  if (!Number.isFinite(n)) return '—'
+  if (n === 0) return '$0'
+  if (n < 0.01) return '$' + String(Number(n.toFixed(6)))
+  if (n < 1) return '$' + trimMoney(n.toFixed(3))
+  return '$' + n.toFixed(2)
+}
+
+function formatRatesRow(card, peak) {
+  return (peak ? 'Peak per 1M: in/out/cache ' : 'Per 1M: in/out/cache ')
+    + [card.input, card.output, card.cacheRead].map(fmtRateAmount).join(' / ')
+}
+
+function rateRowValue(card) {
+  return [card.input, card.output, card.cacheRead].map(fmtRateAmount).join(' / ')
+}
+
+function SessionPanel({ u, est, error, rates }) {
+  const billed = Number.isFinite(u && u.dev_credits_spent_micros)
+  const peak = est ? est.peak : false
+  const card = rates ? rateCard(rates, peak) : null
   const kids = [
     jsx('div', {
       key: 'head',
@@ -223,18 +252,27 @@ function SessionPanel({ u, est, error }) {
     })
   ]
 
-  const tot = fmtTokens(u.total)
-  if (tot == null && !u.calls && !Number.isFinite(u.context_percent)) {
+  const tot = fmtTokens(u && u.total)
+  if (tot == null && !(u && u.calls) && !Number.isFinite(u && u.context_percent)) {
     kids.push(jsx('div', { key: 'empty', className: 'text-[11px] text-(--ui-text-tertiary)', children: 'No turns yet in this session' }))
+    if (card) {
+      kids.push(
+        jsx(Row, {
+          key: 'rates',
+          label: peak ? 'Peak per 1M: in/out/cache' : 'Per 1M: in/out/cache',
+          value: rateRowValue(card)
+        })
+      )
+    }
     return jsx('div', { className: 'space-y-1.5', children: kids })
   }
 
-  if (u.input != null) kids.push(jsx(Row, { key: 'in', label: 'Input tokens', value: fmtTokens(u.input) || '0' }))
-  if (u.output != null) kids.push(jsx(Row, { key: 'out', label: 'Output tokens', value: fmtTokens(u.output) || '0' }))
-  if (Number.isFinite(u.reasoning) && u.reasoning > 0) kids.push(jsx(Row, { key: 'reas', label: 'Reasoning tokens', value: fmtTokens(u.reasoning) || '0' }))
+  if (u && u.input != null) kids.push(jsx(Row, { key: 'in', label: 'Input tokens', value: fmtTokens(u.input) || '0' }))
+  if (u && u.output != null) kids.push(jsx(Row, { key: 'out', label: 'Output tokens', value: fmtTokens(u.output) || '0' }))
+  if (u && Number.isFinite(u.reasoning) && u.reasoning > 0) kids.push(jsx(Row, { key: 'reas', label: 'Reasoning tokens', value: fmtTokens(u.reasoning) || '0' }))
   if (tot != null) kids.push(jsx(Row, { key: 'tot', label: 'Total tokens', value: tot, strong: true }))
-  if (Number.isFinite(u.cache_hit_pct)) kids.push(jsx(Row, { key: 'cache', label: 'Cache hit', value: '◎ ' + u.cache_hit_pct + '%' }))
-  if (u.calls != null) kids.push(jsx(Row, { key: 'calls', label: 'API calls', value: String(u.calls) }))
+  if (u && Number.isFinite(u.cache_hit_pct)) kids.push(jsx(Row, { key: 'cache', label: 'Cache hit', value: '◎ ' + u.cache_hit_pct + '%' }))
+  if (u && u.calls != null) kids.push(jsx(Row, { key: 'calls', label: 'API calls', value: String(u.calls) }))
   kids.push(
     jsx(Row, {
       key: 'cost',
@@ -242,9 +280,18 @@ function SessionPanel({ u, est, error }) {
       value: billed ? fmtCents(u.dev_credits_spent_micros) : est ? fmtUsd(est.usd) : '—'
     })
   )
-  if (Number.isFinite(u.context_percent)) kids.push(jsx(Row, { key: 'ctx', label: 'Context used', value: u.context_percent + '%' }))
-  if (Number.isFinite(u.compressions) && u.compressions > 0) kids.push(jsx(Row, { key: 'comp', label: 'Compressions', value: String(u.compressions) }))
-  if (Number.isFinite(u.active_subagents)) kids.push(jsx(Row, { key: 'subs', label: 'Active subagents', value: String(u.active_subagents) }))
+  if (card) {
+    kids.push(
+      jsx(Row, {
+        key: 'rates',
+        label: peak ? 'Peak per 1M: in/out/cache' : 'Per 1M: in/out/cache',
+        value: rateRowValue(card)
+      })
+    )
+  }
+  if (u && Number.isFinite(u.context_percent)) kids.push(jsx(Row, { key: 'ctx', label: 'Context used', value: u.context_percent + '%' }))
+  if (u && Number.isFinite(u.compressions) && u.compressions > 0) kids.push(jsx(Row, { key: 'comp', label: 'Compressions', value: String(u.compressions) }))
+  if (u && Number.isFinite(u.active_subagents)) kids.push(jsx(Row, { key: 'subs', label: 'Active subagents', value: String(u.active_subagents) }))
 
   if (error) {
     kids.push(jsx('div', { key: 'pyerr', className: 'pt-0.5 text-[10px] text-(--ui-red)', children: error }))
@@ -252,8 +299,8 @@ function SessionPanel({ u, est, error }) {
   if (billed) {
     kids.push(costNote('key-billed', 'Billed spend reported by the provider'))
   } else if (est) {
-    const tier = est.tierApplies ? (est.peak ? ' \u00b7 peak rates (2\u00d7)' : ' \u00b7 off-peak rates') : ''
-    const cache = est.priced ? '' : ' \u00b7 no cache-read rate, cached tokens priced as input'
+    const tier = est.tierApplies ? (est.peak ? ' · peak rates (2×)' : ' · off-peak rates') : ''
+    const cache = est.priced ? '' : ' · no cache-read rate, cached tokens priced as input'
     kids.push(costNote('est', 'Estimated at ' + est.provider + ' / ' + est.model + ' rates' + tier + cache))
   } else {
     kids.push(costNote('nocost', 'No spend reported and no rates cached for this model'))
@@ -266,9 +313,12 @@ function costNote(key, text) {
   return jsx('div', { key, className: 'pt-0.5 text-[10px] text-(--ui-text-quaternary)', children: text })
 }
 
+export { SessionPanel }
+
 export default {
   id: ID, // must match the folder name
   name: 'Session Usage',
+  SessionPanel,
   register(ctx) {
     const sessData = atom({})   // merged usage map: { [sid]: usage }
     const fetchedAt = atom({})  // fetched time map: { [sid]: time }
@@ -428,12 +478,13 @@ export default {
             side: 'top',
             align: 'end',
             sideOffset: 6,
-            className: 'pointer-events-none w-64 select-none',
+            className: 'pointer-events-none w-[19rem] select-none',
             children: hasSess
-              ? jsx(SessionPanel, { u, est, error: ratesErr })
+              ? jsx(SessionPanel, { u, est, error: ratesErr, rates })
               : jsx('div', { className: 'space-y-1.5' }, [
                   jsx('div', { className: 'font-semibold text-foreground', children: 'This session' }),
-                  jsx('div', { className: 'text-[11px] text-(--ui-text-tertiary)', children: 'No turns yet in this session' })
+                  jsx('div', { className: 'text-[11px] text-(--ui-text-tertiary)', children: 'No turns yet in this session' }),
+                  rates ? jsx(SessionPanel, { u: {}, est: null, error: ratesErr, rates }) : null
                 ])
           })
         ]
