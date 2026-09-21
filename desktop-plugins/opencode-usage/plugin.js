@@ -47,7 +47,7 @@ const TICK_MS = 1000
 // `install.sh` sets the SCRIPTS_DIR constant below to this gateway's scripts path.
 const SCRIPT_NAME = 'opencode_go_usage.py'
 const MODELS_SCRIPT = 'opencode_go_models.py'
-const SCRIPTS_DIR = '/home/ubuntu/.hermes/scripts'
+const SCRIPTS_DIR = '__HERMES_SCRIPTS__'
 const PY_CANDIDATES = ['python3', 'python', 'py -3']
 const CONSOLE_URL = 'https://opencode.ai/workspace'
 const WINDOW_ORDER = ['rolling', 'weekly', 'monthly']
