@@ -10,6 +10,8 @@ Three sources, merged into ONE line of JSON on stdout:
      prices and to price models (2) has not listed yet. Cached on disk with a 12h TTL and
      ETag revalidation; falls back to the stale cache, then to the models.dev registry
      cache, when the network is down.
+  4. the local models.dev registry cache (HERMES_HOME/models_dev_cache.json), which
+     supplies each model's release_date for the table's Released column.
 
 Never prints credentials. Always prints parseable JSON, even on partial failure.
 Stdlib only. Usage:  python3 opencode_go_models.py
@@ -107,6 +109,67 @@ def strip_tags(value):
 
 def norm(name):
     return re.sub(r"[^a-z0-9]+", "-", str(name or "").lower()).strip("-")
+
+
+# The registry section the Go catalog mirrors; an id listed there wins over the
+# same id under any other provider.
+GO_SECTION = "opencode-go"
+
+
+def norm_id(value):
+    """Registry id comparison key: lowercase, every non-alphanumeric dropped.
+
+    'MiMo-V2.6-Flash' and 'mimo-v2.6-flash' collapse to one key, which is what
+    lets a served id find its registry entry across every provider.
+    """
+    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+
+def registry_index():
+    """{normalized id: [(provider, id, release_date), ...]} from the registry cache.
+
+    Built once per run from HERMES_HOME/models_dev_cache.json -- the same local
+    file registry_fallback() reads, so no extra request and no network. Only
+    entries that publish a release_date are indexed.
+    """
+    try:
+        cache = json.loads(REGISTRY_CACHE.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(cache, dict):
+        return {}
+    index = {}
+    for provider, section in cache.items():
+        models = (section or {}).get("models") if isinstance(section, dict) else None
+        if not isinstance(models, dict):
+            continue
+        for model_id, spec in models.items():
+            date = (spec or {}).get("release_date") if isinstance(spec, dict) else None
+            if not isinstance(date, str) or not date.strip():
+                continue
+            key = norm_id(model_id)
+            if not key:
+                continue
+            index.setdefault(key, []).append((provider, model_id, date.strip()))
+    return index
+
+
+def release_for(model_id, index):
+    """This model's registry release_date, or None when the registry has none.
+
+    The search runs over EVERY provider: the opencode-go section first, then an
+    exact id match, then the earliest date (a model cannot ship twice, so the
+    earliest date is the real one).
+    """
+    candidates = index.get(norm_id(model_id)) or []
+    if not candidates:
+        return None
+    ranked = sorted(candidates, key=lambda c: (
+        0 if c[0] == GO_SECTION else 1,
+        0 if c[1] == model_id else 1,
+        c[2],
+    ))
+    return ranked[0][2]
 
 
 def as_float(raw):
@@ -448,7 +511,7 @@ def announcement_for(model_id):
     return None
 
 
-def build_model(model_id, docs, catalog, privacy=None, notes=None):
+def build_model(model_id, docs, catalog, privacy=None, notes=None, releases=None):
     entry = docs.get(norm(model_id))
     catalog_entry = catalog.get(model_id) or {}
     tier = default_tier(entry) if entry else {}
@@ -465,6 +528,9 @@ def build_model(model_id, docs, catalog, privacy=None, notes=None):
         "req_week": (entry or {}).get("req_week"),
         "req_month": (entry or {}).get("req_month"),
         "context": catalog_entry.get("context"),
+        # models.dev registry release date, null when the registry has none: the
+        # key is always present so the payload shape stays stable.
+        "released": release_for(model_id, releases or {}),
         "promo": (entry or {}).get("promo"),
         "in_docs": bool(entry),
         "price_source": "docs",
@@ -578,8 +644,9 @@ def main():
         # No key or no API answer: fall back to the live catalog so the table still works.
         served = sorted(catalog)
 
+    releases = registry_index()
     records = [
-        build_model(model_id, docs, catalog, privacy, privacy_notes)
+        build_model(model_id, docs, catalog, privacy, privacy_notes, releases)
         for model_id in served
     ]
     served_keys = set(norm(model_id) for model_id in served)

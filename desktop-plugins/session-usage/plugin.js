@@ -71,17 +71,41 @@ function fmtUsd(d) {
   return '$' + d.toFixed(2)
 }
 
+// ---- Release dates ----------------------------------------------------------
+
+// A registry release_date is a bare 'YYYY-MM-DD'. Format it through the regex
+// and the month table below, NEVER through new Date(): a bare date parses as
+// UTC midnight, so a local-time formatter west of UTC (America/Phoenix, UTC-7)
+// renders the PREVIOUS day. The value is reported exactly as the registry
+// publishes it — never clamped forward, never shifted to today.
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
+const NO_RELEASE_DATE = 'the model registry publishes no release date for this model'
+
+function fmtReleaseDate(raw) {
+  const match = ISO_DATE_RE.exec(String(raw == null ? '' : raw).trim())
+  if (!match) return null
+  const month = MONTH_ABBR[Number(match[2]) - 1]
+  const day = Number(match[3])
+  if (!month || !(day >= 1 && day <= 31)) return null
+  return month + ' ' + day + ', ' + match[1]
+}
+
 // ---- Cost estimation --------------------------------------------------------
 
 // Rates come from the gateway (models.dev registry cache) as $ per 1M tokens.
+// The same payload carries the matched entry's registry release_date, which
+// stands on its own: an entry may publish a date and no cost card at all.
 function parseRates(stdout) {
   const lines = String(stdout || '').split('\n').map(l => l.trim()).filter(Boolean)
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     if (!lines[i].startsWith('{')) continue
     try {
       const parsed = JSON.parse(lines[i])
-      if (parsed && parsed.ok === true && Number.isFinite(parsed.input) && Number.isFinite(parsed.output)) return parsed
-      return null
+      if (!parsed || parsed.ok !== true) return null
+      const priced = Number.isFinite(parsed.input) && Number.isFinite(parsed.output)
+      const dated = typeof parsed.released === 'string'
+      return priced || dated ? parsed : null
     } catch (e) {
       return null
     }
@@ -149,6 +173,10 @@ function costOf(miss, cacheRead, output, card) {
 // session report lands. Peak 2x applies only when BOTH agree on DeepSeek.
 function accumulate(prev, u, rates, nowMs, sessionModel) {
   if (!u || !rates) return prev || null
+  // A registry entry that publishes a release date but no cost card must never
+  // be priced (and must never render as a row of dashed rates): price only a
+  // payload that carries both numbers.
+  if (!Number.isFinite(rates.input) || !Number.isFinite(rates.output)) return prev || null
   const peak = peakApplies(rates.model, rates.provider)
     && isDeepSeekModel(sessionModel || rates.model)
     && isPeakNow(nowMs)
@@ -201,12 +229,16 @@ function mergeUsage(polled, live) {
 
 // ---- UI --------------------------------------------------------------------
 
-function Row({ label, value, strong }) {
+// `title` is an optional tooltip: a placeholder value (a dash) always says what
+// is missing, so a dash is never a dead end.
+function Row({ label, value, strong, title }) {
+  const valueProps = { className: strong ? 'font-semibold text-foreground' : 'text-foreground', children: value }
+  if (title) valueProps.title = title
   return jsx('div', {
     className: 'flex items-center justify-between gap-3',
     children: [
       jsx('span', { className: 'text-(--ui-text-secondary)', children: label }),
-      jsx('span', { className: strong ? 'font-semibold text-foreground' : 'text-foreground', children: value })
+      jsx('span', valueProps)
     ]
   })
 }
@@ -262,7 +294,12 @@ function RateBlock({ card, peak }) {
 function SessionPanel({ u, est, error, rates }) {
   const billed = Number.isFinite(u && u.dev_credits_spent_micros)
   const peak = est ? est.peak : false
-  const card = rates ? rateCard(rates, peak) : null
+  // Only a payload carrying BOTH numbers is a rate card. A date-only payload
+  // (the registry lists the model but publishes no cost for it) yields no card
+  // at all: dashed rates must never render.
+  const priced = Boolean(rates) && Number.isFinite(rates.input) && Number.isFinite(rates.output)
+  const card = priced ? rateCard(rates, peak) : null
+  const released = fmtReleaseDate(rates && rates.released)
   const kids = [
     jsx('div', {
       key: 'head',
@@ -271,6 +308,14 @@ function SessionPanel({ u, est, error, rates }) {
         jsx('span', { className: 'font-semibold text-foreground', children: 'This session' }),
         u.model ? jsx('span', { className: 'max-w-[150px] truncate text-[10px] text-(--ui-text-tertiary)', title: u.model, children: u.model }) : null
       ]
+    }),
+    // The model's registry release date, directly under the header row, so it
+    // is present in the normal panel and in the "No turns yet" empty state.
+    jsx(Row, {
+      key: 'released',
+      label: 'Released',
+      value: released || '—',
+      title: released ? null : NO_RELEASE_DATE
     })
   ]
 

@@ -56,6 +56,7 @@ const WINDOW_ORDER = ['rolling', 'weekly', 'monthly']
 // is never a dead end.
 const DASH = '—'
 const NOT_PUBLISHED = 'not published for this model'
+const NO_REGISTRY_DATE = 'not in the model registry, so it has no published release date'
 const ZDR_TEXT = { '30 days': '30d', 'Not ZDR': 'No' }
 
 // ---- state -----------------------------------------------------------------
@@ -110,6 +111,23 @@ function fmtStamp(iso) {
   return new Intl.DateTimeFormat(undefined, {
     month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
   }).format(new Date(t))
+}
+
+// A registry release_date is a bare 'YYYY-MM-DD' in UTC with no time of day.
+// Format it through the regex and the month table below, NEVER through
+// new Date() + a local formatter: a bare date parses as UTC midnight, which in
+// any zone west of UTC (America/Phoenix, UTC-7) renders the PREVIOUS day. The
+// registry value is reported as published, never clamped or shifted.
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
+
+function fmtReleaseDate(raw) {
+  const match = ISO_DATE_RE.exec(String(raw == null ? '' : raw).trim())
+  if (!match) return null
+  const month = MONTH_ABBR[Number(match[2]) - 1]
+  const day = Number(match[3])
+  if (!month || !(day >= 1 && day <= 31)) return null
+  return month + ' ' + day + ', ' + match[1]
 }
 
 function fmtWindowLength(seconds) {
@@ -414,7 +432,8 @@ function ModelsTable({ models, error }) {
   // so a list restored from storage reports its real age and not the restore time.
   const fetchedMs = parseMs(payload.fetched_at)
 
-  const gridTemplate = 'minmax(11rem, 1.6fr) 4rem 4rem 4.5rem 3.5rem 4.5rem 3.5rem'
+  // Model | Released | In | Out | Cache | Cap | ≈ Req/mo | ZDR
+  const gridTemplate = 'minmax(11rem, 1.6fr) 5.5rem 4rem 4rem 4.5rem 3.5rem 4.5rem 3.5rem'
 
   // The docs' privacy footnotes, numbered in the order the models first appear
   // top to bottom. A note no rendered model references never gets a line.
@@ -515,12 +534,21 @@ function ModelsTable({ models, error }) {
     return props
   }
 
+  // Released: the model's release date from the models.dev registry, carried by
+  // the gateway's payload. A model the registry does not list gets a dash that
+  // says so.
+  function releaseCell(m) {
+    const text = fmtReleaseDate(m.released)
+    return text == null ? { title: NO_REGISTRY_DATE, children: DASH } : { children: text }
+  }
+
   function modelRow(m) {
     return jsxs('div', {
       key: m.id,
       className: cn(rowClass, 'contents'),
       children: [
         jsx('div', { className: 'py-1', children: jsx(NameCell, { m }) }),
+        jsx(RowCell, releaseCell(m)),
         jsx(RowCell, moneyCell(m.input)),
         jsx(RowCell, moneyCell(m.output)),
         jsx(RowCell, moneyCell(m.cache_read)),
@@ -594,6 +622,7 @@ function ModelsTable({ models, error }) {
           style: { display: 'grid', gridTemplateColumns: gridTemplate, gap: '0.5rem' },
           children: [
             jsx('div', { className: headerClass, children: 'Model' }),
+            jsx('div', { className: headerClass, children: 'Released' }),
             jsx('div', { className: cn(headerClass, 'text-right'), children: 'In' }),
             jsx('div', { className: cn(headerClass, 'text-right'), children: 'Out' }),
             jsx('div', { className: cn(headerClass, 'text-right'), children: 'Cache' }),
@@ -605,7 +634,7 @@ function ModelsTable({ models, error }) {
 
             uncapped.length
               ? jsx('div', {
-                  className: 'col-span-7 border-b border-(--ui-stroke-secondary) py-1.5 text-[0.625rem] font-medium tracking-wide text-(--ui-text-quaternary) uppercase',
+                  className: 'col-span-8 border-b border-(--ui-stroke-secondary) py-1.5 text-[0.625rem] font-medium tracking-wide text-(--ui-text-quaternary) uppercase',
                   children: 'Also served by Go, no published cap'
                 })
               : null,
@@ -871,7 +900,9 @@ export default {
       throw new Error('no working python on the gateway shell (tried ' + tried + ')' + (lastCode != null ? '; exit ' + lastCode : '') + (lastError ? '; ' + (lastError.message || lastError) : '') + (sawOutput ? '; the script printed output this plugin could not parse (larger than the gateway reply limit?)' : '') + '; run install.sh on the gateway')
     }
 
-    const storedModels = ctx.storage && typeof ctx.storage.get === 'function' ? ctx.storage.get('models_v1') : null
+    // Storage key v2: the payload gained the per-model `released` date, so a v1
+    // cache would render a column of dashes for up to the 6h TTL. Ignore it.
+    const storedModels = ctx.storage && typeof ctx.storage.get === 'function' ? ctx.storage.get('models_v2') : null
     if (storedModels && typeof storedModels === 'object' && storedModels.models) {
       $models.set(storedModels)
       // Refetch guard only: the table's 'updated <age>' and 'Fetched at' lines read
@@ -910,7 +941,7 @@ export default {
         $modelsAt.set(Date.now())
         $modelsError.set(null)
         if (ctx.storage && typeof ctx.storage.set === 'function') {
-          ctx.storage.set('models_v1', payload)
+          ctx.storage.set('models_v2', payload)
         }
       } catch (e) {
         $modelsError.set('Gateway call failed: ' + (e && e.message ? e.message : String(e)))

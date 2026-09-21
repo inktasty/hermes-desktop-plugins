@@ -7,8 +7,8 @@ from disk.
 | Plugin | Adds |
 | --- | --- |
 | `deepseek-rate` | A status-bar chip showing whether DeepSeek is billing peak (2x) or off-peak right now, in the viewer's own clock. Colors only while a DeepSeek model is active in the focused session. |
-| `opencode-usage` | A status-bar chip plus a full page: the three OpenCode Go quota windows (5-hour, weekly, monthly) with usage vs. time-elapsed gauges, pace projections, reset countdowns, a Console button, and a models table with per-model prices, caps, and promotions. |
-| `session-usage` | A status-bar chip showing the focused session's cost, with a hover panel of tokens, cache-hit rate, API calls, context use, and the current model's per-1M-token rates. |
+| `opencode-usage` | A status-bar chip plus a full page: the three OpenCode Go quota windows (5-hour, weekly, monthly) with usage vs. time-elapsed gauges, pace projections, reset countdowns, a Console button, and a models table with per-model prices, caps, promotions, and registry release dates. |
+| `session-usage` | A status-bar chip showing the focused session's cost, with a hover panel of tokens, cache-hit rate, API calls, context use, the model's registry release date, and the current model's per-1M-token rates. |
 
 ## Requirements
 
