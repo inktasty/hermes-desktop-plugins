@@ -24,7 +24,7 @@ const ID = 'session-usage'
 const POLL_MS = 120000 // light poll; most updates arrive via the live stream
 // `install.sh` sets the SCRIPTS_DIR constant below to this gateway's scripts path.
 const SCRIPT_NAME = 'model_price_lookup.py'
-const SCRIPTS_DIR = '/home/ubuntu/.hermes/scripts'
+const SCRIPTS_DIR = '__HERMES_SCRIPTS__'
 const PY_CANDIDATES = ['python3', 'python', 'py -3']
 
 // Live atoms are resolved ONCE at import, each with a null-atom fallback: a
