@@ -30,10 +30,10 @@ cd hermes-desktop-plugins
 ```
 
 `install.sh` copies the plugins into the app's `desktop-plugins/` folder, copies
-the three gateway scripts into `$HERMES_HOME/scripts/`, rewrites the script
-paths inside the plugins to match your gateway home, and (when `config.yaml`
-exists and `hermes` is on PATH) sets `terminal.env.HERMES_DEV_CREDITS=1` so the
-billed-spend row appears in `session-usage`.
+the three gateway scripts into `$HERMES_HOME/scripts/`, and rewrites the script
+paths inside the plugins to match your gateway home. It writes no config and
+changes no setting on your gateway. The one optional setting is described under
+[Optional: exact billed spend](#optional-exact-billed-spend).
 
 Where the plugin folder lives: **on the machine running the app**, not the
 gateway.
@@ -101,6 +101,30 @@ Two things worth knowing about the estimate:
 
 `deepseek-rate` needs no network at all: the tier is a pure function of the UTC
 clock, and the tooltip renders the peak windows in whatever timezone you are in.
+
+### Optional: exact billed spend
+
+The "Session cost" row shows the provider's real billed amount only when the
+**gateway** process runs with `HERMES_DEV_CREDITS=1`. Nothing enables it for you,
+and that is deliberate: the field is a development readout that upstream gates on
+purpose, and while the flag is on the gateway logs a credits line for every
+response. Turn it on only if you want the exact number.
+
+The flag has to reach the gateway process, which reads its own environment, so the
+gateway's `.env` is the reliable place (`$HERMES_HOME/.env`, or `HOME` of whoever
+runs the gateway, for example `~/.hermes/.env`):
+
+```bash
+echo 'HERMES_DEV_CREDITS=1' >> ~/.hermes/.env
+hermes gateway restart   # a running process only picks it up at startup
+```
+
+A service unit's own `Environment=` line works the same way. There is no `config.yaml`
+setting for it: the flag is read from the gateway process's environment, so
+`hermes config set` cannot reach it.
+
+Without the flag the row is labeled "Session cost (est.)" and shows the estimate
+described above, which works on every provider.
 
 ## Verify before trusting it
 
