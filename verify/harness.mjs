@@ -62,6 +62,9 @@ function walk(node, out) {
   }
   if (typeof type === 'string' || typeof type === 'symbol') {
     if (props && typeof props.title === 'string' && props.title) out.titles.push(props.title)
+    // Plain elements keep their props so a check can drive a click handler that is
+    // not on a prim (Promo/announcement chips are spans).
+    out.els.push({ tag: String(type), props: props || {} })
     walk(props && props.children, out)
     return
   }
@@ -72,7 +75,7 @@ function render(Comp, props) {
   sdk.counts.useValue = 0
   let tree
   let err = null
-  const out = { err, prims: [], text: [], titles: [] }
+  const out = { err, prims: [], text: [], titles: [], els: [] }
   try {
     tree = Comp(props || {})
     walk(tree, out)
@@ -108,6 +111,7 @@ function primOf(out, name) {
 function captureCtx() {
   const contributions = []
   const disposers = []
+  const opened = []
   const ctx = {
     source: 'plugin:test',
     register: c => {
@@ -125,11 +129,11 @@ function captureCtx() {
     onEvent: () => () => {},
     rest: async () => ({}),
     socket: () => () => {},
-    os: {},
+    os: { openExternal: url => { opened.push(url); return Promise.resolve(true) } },
     storage: { get: (k, f) => f, set: () => {}, remove: () => {} },
     i18n: {}
   }
-  return { ctx, contributions, disposers }
+  return { ctx, contributions, disposers, opened }
 }
 
 // ---- timer capture ---------------------------------------------------------
@@ -786,7 +790,7 @@ async function testOpencodeUsage() {
   })
   stubTimers()
   Date.now = () => Date.UTC(2026, 8, 16, 20, 0)
-  const { ctx, contributions } = captureCtx()
+  const { ctx, contributions, opened } = captureCtx()
   mod.register(ctx)
   restoreTimers()
   await settle()
@@ -862,9 +866,11 @@ async function testOpencodeUsage() {
 
   // Announcements and announced caps (Part C)
   check('announcement line names the model, the note and the date',
-    /Omen Alpha — Go-only stealth model: \$100 of usage on the \$10 plan \(announced 2026-09-04\)/.test(pageOut.text), pageOut.text)
+    /Omen Alpha — Go-only stealth model: \$100 of usage on the \$10 plan \(announced Sep 4, 2026\)/.test(pageOut.text), pageOut.text)
   check('announcement line carries the free-week note too',
-    /MiMo-V2\.6-Flash — Free for one week \(announced 2026-09-21\)/.test(pageOut.text), pageOut.text)
+    /MiMo-V2\.6-Flash — Free for one week \(announced Sep 21, 2026\)/.test(pageOut.text), pageOut.text)
+  check('an announcement never renders the raw ISO date',
+    !/2026-09-04/.test(pageOut.text) && !/2026-09-21/.test(pageOut.text), pageOut.text)
   check('announcement spans title their source',
     pageOut.titles.includes('https://x.com/opencode/status/2095746098522452093'), JSON.stringify(pageOut.titles))
   check('an announced cap carries a superscript marker', /\$100 \*/.test(pageOut.text), pageOut.text)
@@ -879,6 +885,72 @@ async function testOpencodeUsage() {
   check('no row renders as four or more dashes', !/(?:—\s+){3,}—/.test(pageOut.text), pageOut.text)
   check('uncapped cap cells say no cap', /\bno cap\b/.test(pageOut.text), pageOut.text)
   check('remaining dashes say what is missing', pageOut.titles.includes('not published for this model'), JSON.stringify(pageOut.titles))
+
+  // Links (Defect 1): the app's pop-up policy denies the in-app window.open door,
+  // so every click must route through ctx.os.openExternal. The fake ctx records it.
+  check('plugin source contains no window.open', !source.includes('window.open'), source.slice(0, 80))
+  opened.length = 0
+  const docsBtn = pageOut.prims.find(p => p.name === 'Button' && p.props.children === 'Go docs')
+  if (docsBtn && typeof docsBtn.props.onClick === 'function') docsBtn.props.onClick()
+  check('Go docs button opens the payload docs_url', opened[opened.length - 1] === modelsPayload.docs_url, JSON.stringify(opened))
+
+  opened.length = 0
+  const annChip = pageOut.els.find(e => typeof e.props.onClick === 'function' && String(e.props.children).startsWith('Omen Alpha'))
+  if (annChip) annChip.props.onClick()
+  check('announcement chip opens its source', opened[opened.length - 1] === modelsPayload.announcements[0].source, JSON.stringify(opened))
+
+  opened.length = 0
+  const promoEl = pageOut.els.find(e => typeof e.props.onClick === 'function' && String(e.props.children).startsWith('Promo Model'))
+  if (promoEl) promoEl.props.onClick()
+  check('promo chip opens the docs', opened[opened.length - 1] === modelsPayload.docs_url, JSON.stringify(opened))
+  check('promo chip says the promo comes from the docs',
+    Boolean(promoEl) && /Go docs/.test(String(promoEl.props.title)), promoEl && JSON.stringify(promoEl.props))
+
+  opened.length = 0
+  const consoleBtn = pageOut.prims.find(p => p.name === 'Button' && p.props.children === 'Console')
+  if (consoleBtn && typeof consoleBtn.props.onClick === 'function') consoleBtn.props.onClick()
+  check('Console button opens the console url', opened[opened.length - 1] === 'https://opencode.ai/workspace', JSON.stringify(opened))
+
+  // ZDR mark spacing (Defect 2): a raised mark must not touch its value.
+  check('the raised mark span carries a separating margin',
+    pageOut.els.some(e => typeof e.props.className === 'string' && e.props.className.includes('align-super') && e.props.className.includes('ml-0.5')),
+    JSON.stringify(pageOut.els.filter(e => typeof e.props.className === 'string' && e.props.className.includes('align-super')).map(e => e.props.className)))
+
+  // Legend (Defect 3): every mark a rendered model uses is explained on the page.
+  check('the legend explains the catalog dagger', /† priced from the live catalog, not yet in the docs/.test(pageOut.text), pageOut.text)
+  check('the legend explains the tiered double dagger', /‡ tiered pricing; hover the model name for the tiers/.test(pageOut.text), pageOut.text)
+  check('the legend explains the announced-cap star', /\* cap announced by OpenCode on X, not in the docs/.test(pageOut.text), pageOut.text)
+
+  // Legend absence: a table with no dagger, no tier and no announced cap gets none.
+  const plainPayload = {
+    ...modelsPayload,
+    counts: { ...modelsPayload.counts, served: 2, with_caps: 2, catalog_mismatch: 0, price_from_catalog: 0 },
+    models: [
+      { ...modelsPayload.models[0], id: 'plain-a', name: 'Plain A', promo: null, monthly_usd: 60, price_source: 'docs', tiers: [], cap_source: 'docs' },
+      { ...modelsPayload.models[1], id: 'plain-b', name: 'Plain B' }
+    ]
+  }
+  const plainMod = (await loadPlugin('opencode-usage', { fresh: 4, scriptsDir: '/tmp/hdp-test/scripts' })).mod
+  sdk.setRpc(async (method, params) => {
+    if (method === 'shell.exec') {
+      const cmd = String(params && params.command || '')
+      if (cmd.includes('opencode_go_models.py')) return { stdout: packPayload(plainPayload), stderr: '', code: 0 }
+      if (cmd.includes('opencode_go_usage.py')) return { stdout: JSON.stringify(snap), stderr: '', code: 0 }
+    }
+    return {}
+  })
+  stubTimers()
+  const { ctx: plainCtx, contributions: plainContributions } = captureCtx()
+  plainMod.register(plainCtx)
+  restoreTimers()
+  await settle(20)
+  const plainPage = plainContributions.find(c => c.area === 'routes')
+  const plainOut = await waitForText(plainPage.render, /Plain A/)
+  check('the plain fixture renders without error', !plainOut.err, plainOut.err && plainOut.err.message)
+  check('no mark used means no legend line',
+    !/priced from the live catalog/.test(plainOut.text)
+    && !/tiered pricing/.test(plainOut.text)
+    && !/cap announced by OpenCode on X/.test(plainOut.text), plainOut.text)
 
   const counts = []
   for (const label of ['first', 'second', 'third']) {
