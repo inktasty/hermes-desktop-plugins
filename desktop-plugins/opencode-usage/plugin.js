@@ -29,10 +29,13 @@ import {
   host,
   PALETTE_AREA,
   ROUTES_AREA,
+  SearchField,
+  SegmentedControl,
   Separator,
   SIDEBAR_NAV_AREA,
   STATUSBAR_AREAS,
   StatusDot,
+  Switch,
   Tip,
   useValue
 } from '@hermes/plugin-sdk'
@@ -434,8 +437,96 @@ function WindowColumn({ win, now, first }) {
   })
 }
 
-function ModelsTable({ models, error }) {
+// ---- model list controls ---------------------------------------------------
+//
+// The bar above the models table sorts one key at a time and stacks a ZDR-only
+// toggle and a name search on top of it. Both rules are pure functions, and both
+// are exported so the probe can exercise them without a render — the grouping,
+// the footnote numbering and the legend lines all run on their output.
+
+const SORT_DEFAULT = 'default'
+const SORT_COST_ASC = 'cost-asc'
+const SORT_COST_DESC = 'cost-desc'
+const SORT_RELEASED_ASC = 'released-asc'
+const SORT_RELEASED_DESC = 'released-desc'
+
+const COST_SORT_OPTIONS = [
+  { id: SORT_DEFAULT, label: 'Default' },
+  { id: SORT_COST_ASC, label: 'Cheapest' },
+  { id: SORT_COST_DESC, label: 'Priciest' }
+]
+const RELEASED_SORT_OPTIONS = [
+  { id: SORT_DEFAULT, label: 'Default' },
+  { id: SORT_RELEASED_DESC, label: 'Newest' },
+  { id: SORT_RELEASED_ASC, label: 'Oldest' }
+]
+
+/** A model's primary input rate: its own rate, else its first priced tier. */
+function modelRate(m) {
+  if (typeof m.input === 'number') return m.input
+  for (const t of m.tiers || []) {
+    if (typeof t.input === 'number') return t.input
+  }
+  return null
+}
+
+/**
+ * Orders a copy of `list`. `key` is 'cost' or 'released'; `dir` is 'asc' or
+ * 'desc'; any other key hands back the payload's own order untouched.
+ *
+ * A model with no rate (or no registry date) sinks to the END in both
+ * directions: a missing number is not a low number, and a model with no
+ * published date is not the newest one.
+ *
+ * `released` is a bare 'YYYY-MM-DD' from the models.dev registry, so it compares
+ * as a STRING. The Released column renders it on the viewer's clock on purpose;
+ * the ordering must not, or west of UTC the sort would disagree with the column.
+ */
+export function sortModels(list, key, dir) {
+  const out = (list || []).slice()
+  const byCost = key === 'cost'
+  const byReleased = key === 'released'
+  if (!byCost && !byReleased) return out
+  const descending = dir === 'desc'
+  out.sort((a, b) => {
+    const x = byCost ? modelRate(a) : typeof a.released === 'string' ? a.released : null
+    const y = byCost ? modelRate(b) : typeof b.released === 'string' ? b.released : null
+    if (x == null && y == null) return 0
+    if (x == null) return 1
+    if (y == null) return -1
+    if (x === y) return 0
+    return (descending ? x > y : x < y) ? -1 : 1
+  })
+  return out
+}
+
+/** The rows the bar asks for: a ZDR-only toggle and a case-insensitive name
+ *  search that stacks on top of it. Returns a new array; never mutates `list`. */
+export function filterModels(list, { zdrOnly = false, query = '' } = {}) {
+  const needle = String(query == null ? '' : query).trim().toLowerCase()
+  return (list || []).filter(m => {
+    if (!m) return false
+    if (zdrOnly && !(m.privacy && m.privacy.zdr === true)) return false
+    if (needle && !String(m.name || '').toLowerCase().includes(needle)) return false
+    return true
+  })
+}
+
+export function ModelsTable({ models, error, initialControls }) {
   const payload = models && models.models ? models : null
+
+  // Hooks run unconditionally, ahead of the early return below: the payload is
+  // null on the first render and arrives later, and a hook after that return
+  // would change the hook count between those two renders.
+  //
+  // `initialControls` is the probe's seam — it renders this component straight at
+  // a given control state so the empty state and the grouping can be checked
+  // without a live React. The app never passes it.
+  const seed = initialControls || {}
+  const [sort, setSort] = useState(typeof seed.sort === 'string' ? seed.sort : SORT_DEFAULT)
+  const [zdrOnly, setZdrOnly] = useState(seed.zdrOnly === true)
+  const [query, setQuery] = useState(typeof seed.query === 'string' ? seed.query : '')
+
   if (!payload) {
     // Never leave the space silently blank: an empty area with no explanation is
     // the one failure mode nobody can debug from the UI.
@@ -454,12 +545,33 @@ function ModelsTable({ models, error }) {
     })
   }
   const list = payload.models || []
+
+  const sortKey = sort === SORT_COST_ASC || sort === SORT_COST_DESC
+    ? 'cost'
+    : sort === SORT_RELEASED_ASC || sort === SORT_RELEASED_DESC
+      ? 'released'
+      : null
+  const sortDir = sort === SORT_COST_DESC || sort === SORT_RELEASED_DESC ? 'desc' : 'asc'
+  // Each control shows its own key as selected, or 'Default' when the OTHER
+  // control holds the one active sort.
+  const costSortValue = sortKey === 'cost' ? sort : SORT_DEFAULT
+  const releasedSortValue = sortKey === 'released' ? sort : SORT_DEFAULT
+
+  // Order first, then narrow. Everything below — the capped/uncapped grouping,
+  // the dividers it draws, the footnote numbering, the legend lines — is
+  // computed from what is actually on screen, so a filtered-out model takes its
+  // footnote and its mark with it.
+  const shown = filterModels(sortModels(list, sortKey, sortDir), { zdrOnly, query })
+  // An empty payload is not the same thing as a filter that hid every row: only
+  // claim the controls matched nothing when there was something to match.
+  const nothingMatches = list.length > 0 && shown.length === 0
+
   // A served model with nothing published at all (no prices and no cap) would
   // render as a row of dashes; name it once under the table instead.
   const hasPrice = m => m.input != null || m.output != null || m.cache_read != null || m.monthly_usd != null
-  const capped = list.filter(m => m.monthly_usd != null)
-  const uncapped = list.filter(m => m.monthly_usd == null && hasPrice(m))
-  const unpriced = list.filter(m => m.monthly_usd == null && !hasPrice(m))
+  const capped = shown.filter(m => m.monthly_usd != null)
+  const uncapped = shown.filter(m => m.monthly_usd == null && hasPrice(m))
+  const unpriced = shown.filter(m => m.monthly_usd == null && !hasPrice(m))
   // Both the header's age and the footer's stamp come from the payload itself,
   // so a list restored from storage reports its real age and not the restore time.
   const fetchedMs = parseMs(payload.fetched_at)
@@ -673,36 +785,85 @@ function ModelsTable({ models, error }) {
         ? jsx('div', { className: 'text-[0.75rem] text-(--ui-red)', children: error })
         : null,
 
-      jsx('div', {
-        className: 'overflow-x-auto',
-        children: jsxs('div', {
-          style: { display: 'grid', gridTemplateColumns: gridTemplate, gap: '0.5rem' },
-          children: [
-            jsx('div', { className: headerClass, children: 'Model' }),
-            jsx('div', { className: headerClass, children: 'Released' }),
-            jsx('div', { className: cn(headerClass, 'text-right'), children: 'In' }),
-            jsx('div', { className: cn(headerClass, 'text-right'), children: 'Out' }),
-            jsx('div', { className: cn(headerClass, 'text-right'), children: 'Cache' }),
-            jsx('div', { className: cn(headerClass, 'text-right'), children: 'Cap' }),
-            jsx('div', { className: cn(headerClass, 'text-right'), children: '≈ Req/mo' }),
-            jsx('div', { className: cn(headerClass, 'text-right'), children: 'ZDR' }),
+      // The sort/filter bar sits directly above the table it acts on. Only the
+      // table's own content obeys it — the grouping, the dividers, the footnotes
+      // and the unpriced line are all recomputed from the rows that survive it.
+      // The promo and announcement lines above are the payload's, not the table's.
+      list.length
+        ? jsxs('div', {
+            className: 'flex flex-wrap items-center gap-x-3 gap-y-1',
+            children: [
+              jsxs('div', {
+                className: 'flex items-center gap-1.5 text-[0.6875rem] text-(--ui-text-quaternary)',
+                children: [
+                  jsx('span', { children: 'Sort cost' }),
+                  jsx(SegmentedControl, { options: COST_SORT_OPTIONS, value: costSortValue, onChange: setSort })
+                ]
+              }),
+              jsxs('div', {
+                className: 'flex items-center gap-1.5 text-[0.6875rem] text-(--ui-text-quaternary)',
+                children: [
+                  jsx('span', { children: 'Sort released' }),
+                  jsx(SegmentedControl, { options: RELEASED_SORT_OPTIONS, value: releasedSortValue, onChange: setSort })
+                ]
+              }),
+              jsxs('div', {
+                className: 'flex items-center gap-1.5 text-[0.6875rem] text-(--ui-text-quaternary)',
+                children: [
+                  jsx(Switch, {
+                    checked: zdrOnly,
+                    size: 'xs',
+                    'aria-label': 'Zero data retention models only',
+                    onCheckedChange: next => setZdrOnly(next === true)
+                  }),
+                  jsx('span', { children: 'ZDR only' })
+                ]
+              }),
+              jsx(SearchField, {
+                placeholder: 'Search models',
+                'aria-label': 'Search models by name',
+                value: query,
+                onChange: next => setQuery(next == null ? '' : String(next))
+              })
+            ]
+          })
+        : null,
 
-            capped.map(modelRow),
+      nothingMatches
+        ? jsx('div', {
+            className: 'text-[0.6875rem] text-(--ui-text-quaternary)',
+            children: 'No models match the current filters.'
+          })
+        : jsx('div', {
+            className: 'overflow-x-auto',
+            children: jsxs('div', {
+              style: { display: 'grid', gridTemplateColumns: gridTemplate, gap: '0.5rem' },
+              children: [
+                jsx('div', { className: headerClass, children: 'Model' }),
+                jsx('div', { className: headerClass, children: 'Released' }),
+                jsx('div', { className: cn(headerClass, 'text-right'), children: 'In' }),
+                jsx('div', { className: cn(headerClass, 'text-right'), children: 'Out' }),
+                jsx('div', { className: cn(headerClass, 'text-right'), children: 'Cache' }),
+                jsx('div', { className: cn(headerClass, 'text-right'), children: 'Cap' }),
+                jsx('div', { className: cn(headerClass, 'text-right'), children: '≈ Req/mo' }),
+                jsx('div', { className: cn(headerClass, 'text-right'), children: 'ZDR' }),
 
-            uncapped.length
-              ? jsx('div', {
-                  className: 'border-b border-(--ui-stroke-secondary) py-1.5 text-[0.625rem] font-medium tracking-wide text-(--ui-text-quaternary) uppercase',
-                  // Spans the grid with an inline style: the utility class that
-                  // used to try this is one the app never compiles, so the
-                  // divider sat in the first column only.
-                  style: { gridColumn: '1 / -1' },
-                  children: 'Also served by Go, no published cap'
-                })
-              : null,
-            uncapped.map(modelRow)
-          ]
-        })
-      }),
+                capped.map(modelRow),
+
+                uncapped.length
+                  ? jsx('div', {
+                      className: 'border-b border-(--ui-stroke-secondary) py-1.5 text-[0.625rem] font-medium tracking-wide text-(--ui-text-quaternary) uppercase',
+                      // Spans the grid with an inline style: the utility class that
+                      // used to try this is one the app never compiles, so the
+                      // divider sat in the first column only.
+                      style: { gridColumn: '1 / -1' },
+                      children: 'Also served by Go, no published cap'
+                    })
+                  : null,
+                uncapped.map(modelRow)
+              ]
+            })
+          }),
 
       unpriced.length
         ? jsx('div', {

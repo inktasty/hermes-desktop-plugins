@@ -167,8 +167,11 @@ async function loadPlugin(id, { fresh = 0, scriptsDir = null } = {}) {
   }
   const localHash = sha(copyFresh)
   const canonHash = sha(src)
-  const mod = await import('./' + id + '.plugin' + (fresh ? '.' + fresh : '') + '.js')
-  return { bad, canonHash, localHash, mod: mod.default, source, installed: Boolean(scriptsDir) }
+  // `ns` is the whole module namespace, not just the default export: the
+  // opencode-usage probes reach its two exported control helpers and the table
+  // component through it.
+  const ns = await import('./' + id + '.plugin' + (fresh ? '.' + fresh : '') + '.js')
+  return { bad, canonHash, localHash, mod: ns.default, ns, source, installed: Boolean(scriptsDir) }
 }
 
 // ---- independent peak oracle -----------------------------------------------
@@ -777,7 +780,7 @@ async function testOpencodeUsage() {
 
   // Functional tests run against an installed copy so the SCRIPTS_DIR token is
   // resolved the same way install.sh resolves it.
-  const { mod } = await loadPlugin('opencode-usage', { fresh: 1, scriptsDir: '/tmp/hdp-test/scripts' })
+  const { mod, ns } = await loadPlugin('opencode-usage', { fresh: 1, scriptsDir: '/tmp/hdp-test/scripts' })
   check('id matches folder', mod.id === 'opencode-usage', mod.id)
 
   sdk.setRpc(async (method, params) => {
@@ -961,6 +964,135 @@ async function testOpencodeUsage() {
     !/priced from the live catalog/.test(plainOut.text)
     && !/tiered pricing/.test(plainOut.text)
     && !/cap announced by OpenCode on X/.test(plainOut.text), plainOut.text)
+
+  // Filter + sort bar (t_5c6ee6d0): the controls above the models table. The two
+  // rules are exported pure helpers, so they are exercised directly, and the
+  // table is then rendered once per control state to prove what happens to the
+  // rows, the group divider and the footnote/legend lines. `ns` is the plugin's
+  // module namespace, not its default export.
+  check('the plugin exports the two control helpers',
+    typeof ns.filterModels === 'function' && typeof ns.sortModels === 'function',
+    typeof ns.filterModels + '/' + typeof ns.sortModels)
+
+  const rows = modelsPayload.models
+  const zdrRows = ns.filterModels(rows, { zdrOnly: true }).map(m => m.id)
+  check('ZDR-only keeps exactly the zero-retention rows',
+    JSON.stringify(zdrRows) === JSON.stringify(['promo-model', 'tiered-model']), JSON.stringify(zdrRows))
+  const searchRows = ns.filterModels(rows, { query: '  OMEN ' }).map(m => m.id)
+  check('the name search is case-insensitive and trims the query',
+    JSON.stringify(searchRows) === JSON.stringify(['omen-alpha']), JSON.stringify(searchRows))
+  const stackedRows = ns.filterModels(rows, { zdrOnly: true, query: 'tier' }).map(m => m.id)
+  check('the ZDR toggle and the search box stack', JSON.stringify(stackedRows) === JSON.stringify(['tiered-model']), JSON.stringify(stackedRows))
+  check('a query nothing matches empties the list', ns.filterModels(rows, { query: 'zzz' }).length === 0)
+
+  const rowsBefore = rows.slice()
+  const filteredCopy = ns.filterModels(rows, { zdrOnly: true })
+  check('filterModels returns a new array and never mutates its input',
+    filteredCopy !== rows && rows.length === rowsBefore.length && rows.every((m, i) => m === rowsBefore[i]))
+
+  const rateOf = m => (typeof m.input === 'number' ? m.input : m.tiers && m.tiers[0] ? m.tiers[0].input : null)
+  const costAsc = ns.sortModels(rows, 'cost', 'asc')
+  const costDesc = ns.sortModels(rows, 'cost', 'desc')
+  const monotonic = (list, dir) => list.every((m, i) => i === 0 || (dir === 'asc'
+    ? rateOf(list[i - 1]) <= rateOf(m)
+    : rateOf(list[i - 1]) >= rateOf(m)))
+  check('cost sort ascending is monotonic cheapest-first',
+    monotonic(costAsc.filter(m => rateOf(m) != null), 'asc'), costAsc.map(m => m.id + '=' + rateOf(m)).join(' '))
+  check('cost sort descending is monotonic priciest-first',
+    monotonic(costDesc.filter(m => rateOf(m) != null), 'desc'), costDesc.map(m => m.id).join(' '))
+  check('a model with no published rate sinks to the end of the cost sort, both ways',
+    costAsc[costAsc.length - 1].id === 'served-no-price' && costDesc[costDesc.length - 1].id === 'served-no-price',
+    costAsc.map(m => m.id).join(' '))
+
+  const rowsKept = rows.slice()
+  const sortedCopy = ns.sortModels(rows, 'cost', 'asc')
+  check('sortModels returns a new array and never mutates its input',
+    sortedCopy !== rows && rows.every((m, i) => m === rowsKept[i]))
+  check('an unknown sort key keeps the payload order',
+    JSON.stringify(ns.sortModels(rows, 'default', 'asc').map(m => m.id)) === JSON.stringify(rows.map(m => m.id)))
+
+  const newest = ns.sortModels(rows, 'released', 'desc').map(m => m.id)
+  const oldest = ns.sortModels(rows, 'released', 'asc').map(m => m.id)
+  check('release-date sort puts the newest release first',
+    newest[0] === 'promo-model' && newest[newest.length - 1] === 'served-no-price', newest.join(' '))
+  check('release-date sort puts the oldest release first', oldest[0] === 'cap-no-promo', oldest.join(' '))
+  check('models with no registry date sink to the end of the release sort',
+    newest.slice(-2).sort().join(',') === 'low-cap,served-no-price', newest.join(' '))
+
+  // The bar as the page renders it, with no control touched.
+  const segs = primOf(pageOut, 'SegmentedControl')
+  check('the models page renders one sort control per key', segs.length === 2, String(segs.length))
+  check('the sort controls offer cheapest/priciest and newest/oldest',
+    segs.map(s => (s.props.options || []).map(o => o.label).join('/')).join(' | ') === 'Default/Cheapest/Priciest | Default/Newest/Oldest',
+    JSON.stringify(segs.map(s => s.props.options)))
+  check('both sort controls start on the payload order', segs.every(s => s.props.value === 'default'), JSON.stringify(segs.map(s => s.props.value)))
+  const zdrSwitch = primOf(pageOut, 'Switch')[0]
+  const searchBox = primOf(pageOut, 'SearchField')[0]
+  check('the bar carries one ZDR-only switch and one name search box', Boolean(zdrSwitch) && Boolean(searchBox))
+  check('the switch and the search box are wired to their handlers',
+    Boolean(zdrSwitch) && typeof zdrSwitch.props.onCheckedChange === 'function' && Boolean(searchBox) && typeof searchBox.props.onChange === 'function')
+  check('the bar labels both controls on the page',
+    /Sort cost/.test(pageOut.text) && /Sort released/.test(pageOut.text) && /ZDR only/.test(pageOut.text), pageOut.text.slice(0, 200))
+
+  // The app's React owns the control state, so the probe seeds it: ModelsTable is
+  // exported and takes `initialControls` for exactly this. Everything from the
+  // column headers down is the table's own text; the promo and announcement lines
+  // above it are the payload's, not the table's.
+  const tableText = out => {
+    const at = out.text.indexOf('Req/mo')
+    return at < 0 ? '' : out.text.slice(at)
+  }
+  const noMatchOut = render(ns.ModelsTable, { models: modelsPayload, error: null, initialControls: { query: 'zzz' } })
+  check('a query nothing matches renders one line instead of the table',
+    !noMatchOut.err && /No models match the current filters\./.test(noMatchOut.text) && tableText(noMatchOut) === '',
+    noMatchOut.err ? noMatchOut.err.message : noMatchOut.text.slice(0, 200))
+
+  const zdrOut = render(ns.ModelsTable, { models: modelsPayload, error: null, initialControls: { zdrOnly: true } })
+  check('ZDR-only keeps the two zero-retention rows',
+    /Promo Model/.test(zdrOut.text) && /Tiered Model/.test(zdrOut.text), zdrOut.text.slice(0, 200))
+  check('ZDR-only drops every other row',
+    !/Cap No Promo/.test(zdrOut.text) && !/Low Cap/.test(zdrOut.text) && !/Catalog Priced/.test(zdrOut.text) && !/Served No Price/.test(zdrOut.text),
+    zdrOut.text.slice(0, 200))
+  check('a group whose rows are all filtered out loses its divider',
+    !/no published cap/.test(zdrOut.text), zdrOut.text.slice(0, 300))
+  check('a filtered-out model takes its footnote and its legend line with it',
+    /1 Deep Note:/.test(zdrOut.text) && !/GPT Note/.test(zdrOut.text) && !/Muse Note/.test(zdrOut.text)
+      && /\u2021 tiered pricing/.test(zdrOut.text)
+      && !/priced from the live catalog/.test(zdrOut.text)
+      && !/cap announced by OpenCode on X/.test(zdrOut.text),
+    zdrOut.text.slice(0, 300))
+
+  const emptyOut = render(ns.ModelsTable, { models: { ...modelsPayload, models: [] }, error: null })
+  check('an empty model list shows no control bar and no filter message',
+    !emptyOut.err && primOf(emptyOut, 'SegmentedControl').length === 0 && !/No models match/.test(emptyOut.text),
+    emptyOut.err ? emptyOut.err.message : emptyOut.text.slice(0, 120))
+
+  const costOut = render(ns.ModelsTable, { models: modelsPayload, error: null, initialControls: { sort: 'cost-asc' } })
+  const costText = tableText(costOut)
+  // The sort runs INSIDE each group, so the uncapped row (Catalog Priced, $0.20 in)
+  // stays in its own section under the divider however cheap it is; among the
+  // capped rows the two $0.15 models keep their payload order (the sort is stable).
+  const costIdx = ['Promo Model', 'Low Cap', 'Omen Alpha', 'Tiered Model', 'Cap No Promo', 'Catalog Priced'].map(n => costText.indexOf(n))
+  check('cheapest-first orders the table rows by input rate',
+    costIdx.every(i => i >= 0) && costIdx.every((v, i) => i === 0 || v > costIdx[i - 1])
+      && costText.indexOf('Also served by Go, no published cap') < costIdx[costIdx.length - 1],
+    JSON.stringify({ costIdx, costText: costText.slice(0, 160) }))
+  check('the unpriced model stays on its own line under the table',
+    costText.indexOf('Served No Price') > costIdx[costIdx.length - 1], costText.slice(0, 200))
+
+  const dateOut = render(ns.ModelsTable, { models: modelsPayload, error: null, initialControls: { sort: 'released-desc' } })
+  const dateText = tableText(dateOut)
+  const dateIdx = ['Promo Model', 'Omen Alpha', 'Tiered Model', 'Cap No Promo', 'Low Cap', 'Catalog Priced'].map(n => dateText.indexOf(n))
+  check('newest-first orders the table rows by registry date',
+    dateIdx.every(i => i >= 0) && dateIdx.every((v, i) => i === 0 || v > dateIdx[i - 1])
+      && dateText.indexOf('Also served by Go, no published cap') < dateIdx[dateIdx.length - 1],
+    JSON.stringify({ dateIdx, dateText: dateText.slice(0, 160) }))
+
+  const searchOut = render(ns.ModelsTable, { models: modelsPayload, error: null, initialControls: { query: 'omen' } })
+  const searchText = tableText(searchOut)
+  check('the search box narrows the table to the matching rows',
+    searchText.includes('Omen Alpha') && !searchText.includes('Promo Model') && !searchText.includes('Cap No Promo'),
+    searchText.slice(0, 200))
 
   const counts = []
   for (const label of ['first', 'second', 'third']) {
