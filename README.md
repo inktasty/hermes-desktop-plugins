@@ -22,6 +22,15 @@ from disk.
 
 ## Install
 
+Easiest path: paste this one line into your Hermes agent and it does the whole
+thing.
+
+```text
+Install the desktop plugins in https://github.com/inktasty/hermes-desktop-plugins: clone the repo, follow its README, run ./install.sh so the gateway home is my gateway's and the plugin folder is the app's desktop-plugins folder on the machine running the app, then reload desktop plugins and confirm all three loaded.
+```
+
+By hand instead:
+
 ```bash
 git clone https://github.com/inktasty/hermes-desktop-plugins
 cd hermes-desktop-plugins
