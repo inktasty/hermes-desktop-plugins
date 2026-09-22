@@ -113,11 +113,17 @@ clock, and the tooltip renders the peak windows in whatever timezone you are in.
 
 ### Optional: exact billed spend
 
-The "Session cost" row shows the provider's real billed amount only when the
-**gateway** process runs with `HERMES_DEV_CREDITS=1`. Nothing enables it for you,
-and that is deliberate: the field is a development readout that upstream gates on
-purpose, and while the flag is on the gateway logs a credits line for every
-response. Turn it on only if you want the exact number.
+The "Session cost" row shows the provider's real billed amount only when both of
+these are true: the **gateway** process runs with `HERMES_DEV_CREDITS=1`, and the
+focused session is routed through **Nous's own API**, because the figure arrives as
+response headers from Nous. A session on any other provider (OpenCode Go, xAI,
+OpenRouter) never carries it, so its row stays an estimate no matter what the flag
+says.
+
+Nothing enables the flag for you, and that is deliberate: the field is a development
+readout that upstream gates on purpose, and while the flag is on the gateway logs a
+credits line for every response. Turn it on only if both conditions above are true
+for you.
 
 The flag has to reach the gateway process, which reads its own environment, so the
 gateway's `.env` is the reliable place (`$HERMES_HOME/.env`, or `HOME` of whoever
@@ -160,13 +166,30 @@ remote-visible proof: `%LOCALAPPDATA%\hermes\logs\desktop.log` on Windows,
 lines tagged `[plugins]`. A successful load is silent; `runtime load failed
 (<id>)` means it never registered.
 
-## Adding another plugin here
+## Contributing a plugin
 
-New plugins for this set land in the same shape: `desktop-plugins/<id>/plugin.js`
-with the folder name equal to the plugin's `id`, a row in the table above, an
-entry in the `PLUGIN_IDS` list at the top of `install.sh` when it needs
-installing, and a `verify/harness.mjs` case asserting what it must get right.
-Keep the harness green under at least two `TZ` values before publishing.
+Pull requests are welcome. A plugin lands in the same shape as the three here, and
+the shape is what keeps them cheap to load:
+
+- `desktop-plugins/<id>/plugin.js`, one file, no build step, the folder name equal
+  to the plugin's `id`.
+- A row in the table at the top of this README saying what it adds.
+- An entry in `PLUGIN_IDS` in `install.sh` if it needs installing there.
+- A case in `verify/harness.mjs` that asserts what it must get right. CI does not
+  exist here yet, so the harness and the class audit are the review.
+
+Two things that bite every new plugin, both learned the hard way:
+
+1. **The app only compiles the CSS classes its own source uses.** A Tailwind class
+   that appears nowhere in the app does nothing at all, silently, which is how a
+   raised footnote mark and a full-width table divider went missing. Use inline
+   styles for anything the app might not already use, and run
+   `node verify/class-audit.mjs` before opening a PR.
+2. **A plugin folder is not always noticed by a running app.** Reload desktop
+   plugins from the command palette after adding one.
+
+Run the harness under at least two `TZ` values, and add the plugin's own gotchas to
+`docs/learnings/` in the same style as the notes already there.
 
 ## Credits
 
