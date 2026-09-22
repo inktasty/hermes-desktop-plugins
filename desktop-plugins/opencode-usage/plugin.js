@@ -347,7 +347,8 @@ function WindowColumn({ win, now, first }) {
         className: 'flex items-baseline gap-1.5',
         children: [
           jsx('span', {
-            className: cn('text-[1.75rem] leading-none font-semibold tabular-nums', tone === 'bad' ? 'text-(--ui-red)' : 'text-foreground'),
+            className: cn('leading-none font-semibold tabular-nums', tone === 'bad' ? 'text-(--ui-red)' : 'text-foreground'),
+            style: { fontSize: '1.75rem', lineHeight: 1 },
             children: used == null ? '--' : String(used)
           }),
           jsx('span', { className: 'text-sm font-medium text-(--ui-text-secondary)', children: '%' }),
@@ -387,8 +388,12 @@ function WindowColumn({ win, now, first }) {
         ? jsxs('div', {
             className: cn(
               'flex items-center gap-1.5 text-[0.6875rem]',
-              verdict.tone === 'warn' ? 'text-(--ui-orange)' : 'text-(--ui-text-quaternary)'
+              verdict.tone === 'warn' ? null : 'text-(--ui-text-quaternary)'
             ),
+            // Inline colour: the utility class that used to carry this is one the
+            // app never compiles (it scans its own sources, never plugin files),
+            // so the warn colour would silently do nothing.
+            style: verdict.tone === 'warn' ? { color: 'var(--ui-orange)' } : undefined,
             children: [
               jsx(Codicon, { name: verdict.tone === 'warn' ? 'warning' : 'check' }),
               verdict.text
@@ -536,8 +541,16 @@ function ModelsTable({ models, error }) {
   // A raised footnote mark must not touch the value it follows: with no margin a
   // right-aligned tabular-nums cell reads '0d1' / 'No2' as a wrong number. The
   // margin lives here, so both call sites get it.
+  //
+  // Inline styles, not utility classes: Tailwind compiles the app's OWN sources
+  // only and never scans plugin files, so a class here would silently do
+  // nothing — that is exactly what happened to the ZDR footnote digit.
+  // verify/class-audit.mjs guards the whole class.
   function superMark(text) {
-    return jsx('span', { className: 'ml-0.5 align-super text-[0.5rem]', children: text })
+    return jsx('span', {
+      style: { fontSize: '0.5rem', verticalAlign: 'super', marginLeft: '0.125rem' },
+      children: text
+    })
   }
 
   // Cap: 'no cap' when the docs publish none, a superscript star when the number
@@ -626,7 +639,8 @@ function ModelsTable({ models, error }) {
 
       (payload.promos || []).length
         ? jsxs('div', {
-            className: 'flex flex-wrap gap-x-3 gap-y-1 text-[0.6875rem] text-(--ui-orange)',
+            className: 'flex flex-wrap gap-x-3 gap-y-1 text-[0.6875rem]',
+            style: { color: 'var(--ui-orange)' },
             children: payload.promos.map(p => {
               const before = p.monthly_before_usd != null ? fmtCap(p.monthly_before_usd) : null
               const after = p.monthly_usd != null ? fmtCap(p.monthly_usd) : null
@@ -643,7 +657,8 @@ function ModelsTable({ models, error }) {
 
       (payload.announcements || []).length
         ? jsxs('div', {
-            className: 'flex flex-wrap gap-x-3 gap-y-1 text-[0.6875rem] text-(--ui-orange)',
+            className: 'flex flex-wrap gap-x-3 gap-y-1 text-[0.6875rem]',
+            style: { color: 'var(--ui-orange)' },
             children: payload.announcements.map(a => jsx('span', {
               key: a.model_key,
               title: a.source,
@@ -676,7 +691,11 @@ function ModelsTable({ models, error }) {
 
             uncapped.length
               ? jsx('div', {
-                  className: 'col-span-8 border-b border-(--ui-stroke-secondary) py-1.5 text-[0.625rem] font-medium tracking-wide text-(--ui-text-quaternary) uppercase',
+                  className: 'border-b border-(--ui-stroke-secondary) py-1.5 text-[0.625rem] font-medium tracking-wide text-(--ui-text-quaternary) uppercase',
+                  // Spans the grid with an inline style: the utility class that
+                  // used to try this is one the app never compiles, so the
+                  // divider sat in the first column only.
+                  style: { gridColumn: '1 / -1' },
                   children: 'Also served by Go, no published cap'
                 })
               : null,

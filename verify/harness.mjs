@@ -829,7 +829,12 @@ async function testOpencodeUsage() {
   check('page shows catalog-priced dagger', /†/.test(pageOut.text), pageOut.text)
   check('page shows difference count', /1 of 7 prices differ/.test(pageOut.text), pageOut.text)
   check('page shows uncapped group header', /Also served by Go, no published cap/.test(pageOut.text), pageOut.text)
-  check('the uncapped divider spans all eight columns', source.includes('col-span-8'), source.slice(0, 60))
+  // `col-span-8` is a class the app never compiles (Tailwind scans the app's own
+  // sources, never plugin files), so the divider spans with an inline style.
+  const dividerEl = pageOut.els.find(e => e.props.children === 'Also served by Go, no published cap')
+  check('the uncapped divider spans all eight columns with an inline gridColumn',
+    Boolean(dividerEl) && Boolean(dividerEl.props.style) && dividerEl.props.style.gridColumn === '1 / -1',
+    dividerEl && JSON.stringify(dividerEl.props))
   check('page shows plan notes', /Contributor Program:/.test(pageOut.text), pageOut.text)
 
   // Layout (Part A)
@@ -911,10 +916,15 @@ async function testOpencodeUsage() {
   if (consoleBtn && typeof consoleBtn.props.onClick === 'function') consoleBtn.props.onClick()
   check('Console button opens the console url', opened[opened.length - 1] === 'https://opencode.ai/workspace', JSON.stringify(opened))
 
-  // ZDR mark spacing (Defect 2): a raised mark must not touch its value.
-  check('the raised mark span carries a separating margin',
-    pageOut.els.some(e => typeof e.props.className === 'string' && e.props.className.includes('align-super') && e.props.className.includes('ml-0.5')),
-    JSON.stringify(pageOut.els.filter(e => typeof e.props.className === 'string' && e.props.className.includes('align-super')).map(e => e.props.className)))
+  // ZDR mark spacing (Defect 2): a raised mark must not touch its value, and the
+  // raise/spacing must be inline styles — Tailwind never compiles a class the
+  // app's own sources lack, so a utility class here would silently do nothing
+  // (that is how the ZDR footnote digit ended up on the value's baseline).
+  const markEls = pageOut.els.filter(e => e.props.style && e.props.style.verticalAlign === 'super')
+  check('the raised mark keeps its raise and separating margin as inline styles',
+    markEls.length > 0 &&
+      markEls.every(e => e.props.style.marginLeft && e.props.style.marginLeft !== '0' && e.props.style.fontSize),
+    JSON.stringify(markEls.map(e => e.props.style)))
 
   // Legend (Defect 3): every mark a rendered model uses is explained on the page.
   check('the legend explains the catalog dagger', /† priced from the live catalog, not yet in the docs/.test(pageOut.text), pageOut.text)

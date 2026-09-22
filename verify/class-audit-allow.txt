@@ -1,0 +1,20 @@
+# Tokens verify/class-audit.mjs may skip.
+#
+# Format: one token per line, optional free-text reason after the token.
+# Lines starting with # are comments.
+#
+# An entry here means "this class is deliberately not compilable by the app".
+# A class the app's own sources DO use needs no entry: the audit finds it.
+# Prefer an inline style over an allowlist entry — an entry is a standing
+# licence for a class that does nothing at runtime, so it must carry a reason.
+#
+# The three entries below are the quota-card separator variants at
+# desktop-plugins/opencode-usage/plugin.js:324. The audit found them (the card
+# that added the guard knew of five others); they are absent from the app's
+# sources exactly like those five, but they are `sm:` media-query variants, which
+# an inline style cannot express. They have never applied, so leaving them
+# changes nothing visually. OPEN QUESTION for Luke, not a fix: either drop the
+# variants or give the cards a separator the app actually compiles.
+sm:border-s
+sm:border-(--ui-stroke-tertiary)
+sm:ps-6
