@@ -1,4 +1,6 @@
 verify/*.plugin.js
 verify/*.plugin.*.js
+# scratch copies the probes generate and import (e.g. verify/opencode-usage.e2e.gen.js)
+verify/*.gen.js
 node_modules/.cache/
 *.zip

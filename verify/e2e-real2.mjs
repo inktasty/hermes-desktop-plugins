@@ -1,7 +1,10 @@
 // End-to-end probe: drive the REAL opencode-usage plugin against a REAL shell, so the
 // plugin -> shell.exec -> gateway script path is exercised exactly as the app does it.
-// Run from the mirror's verify/ dir:  node e2e-real2.mjs
+// Run from verify/ as:  node e2e-real2.mjs
+// The scratch copy it imports is generated and gitignored (verify/*.gen.js), so a run
+// leaves the working tree clean.
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
@@ -9,8 +12,18 @@ import * as sdk from '@hermes/plugin-sdk'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const SRC = process.env.PLUGIN_SRC || path.join(HERE, '..', 'desktop-plugins')
-const COPY = path.join(HERE, 'opencode-usage.e2e.js')
-fs.copyFileSync(path.join(SRC, 'opencode-usage', 'plugin.js'), COPY)
+// The repo mirror keeps the `__HERMES_SCRIPTS__` token by contract (install.sh
+// substitutes it on the app machine) and the plugin refuses to fetch while the
+// token is still there, so a bare run against the mirror used to fail. Substitute
+// it into the scratch copy the same way install.sh does; a PLUGIN_SRC pointed at
+// an installed copy (no token) is left unchanged.
+// SCRIPTS_DIR overrides; the default is the standard gateway home. HERMES_HOME is
+// deliberately NOT consulted: in a bot/worker shell it names the profile home
+// (/home/ubuntu/.hermes/profiles/<name>), which holds no scripts/ dir.
+const SCRIPTS_DIR = process.env.SCRIPTS_DIR || path.join(os.homedir(), '.hermes', 'scripts')
+const COPY = path.join(HERE, 'opencode-usage.e2e.gen.js')
+const pluginSource = fs.readFileSync(path.join(SRC, 'opencode-usage', 'plugin.js'), 'utf8')
+fs.writeFileSync(COPY, pluginSource.replaceAll('__HERMES_SCRIPTS__', SCRIPTS_DIR))
 
 const calls = []
 sdk.setRpc(async (method, params) => {
@@ -58,7 +71,7 @@ const ctx = {
   storage: { get: (k, f) => (k in stored ? stored[k] : f), set: (k, v) => { stored[k] = v }, remove: k => { delete stored[k] } }
 }
 
-const mod = (await import('./opencode-usage.e2e.js')).default
+const mod = (await import('./opencode-usage.e2e.gen.js')).default
 mod.register(ctx)
 console.log('registered contributions:', contributions.length)
 for (let i = 0; i < 80 && calls.length < 1; i += 1) await wait(250)
