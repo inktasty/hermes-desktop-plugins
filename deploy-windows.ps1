@@ -49,6 +49,12 @@ foreach ($id in $pluginIds) {
     # Point the plugin at the gateway's scripts. Nothing else in the file changes.
     $content = ([System.IO.File]::ReadAllText($src)).Replace($scriptsToken, $ScriptsDir)
 
+    # A clone on Windows may check files out as CRLF (core.autocrlf=true) while the
+    # committed blob is LF. The deployed file must stay byte-identical to the
+    # canonical LF file, or a deployment can no longer be proved by comparing hashes
+    # across machines, so normalize before comparing or writing.
+    $content = $content.Replace("`r`n", "`n")
+
     $destDir = Split-Path -Parent $dest
     if (-not [System.IO.Directory]::Exists($destDir)) {
         [System.IO.Directory]::CreateDirectory($destDir) | Out-Null
