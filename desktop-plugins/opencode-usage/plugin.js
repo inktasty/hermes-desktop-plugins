@@ -74,6 +74,16 @@ const $modelsLoading = atom(false)
 
 let refresh = async () => {}
 let refreshModels = async () => {}
+let pluginCtx = null          // set by register(); render components live at module scope
+
+// The app blocks every authored pop-up by policy in its main process, so the
+// only way out is ctx.os.openExternal, the audited hermes:openExternal door.
+function openExternal(url) {
+  if (typeof url !== 'string' || !url) return
+  const os = pluginCtx && pluginCtx.os
+  if (!os || typeof os.openExternal !== 'function') return
+  void os.openExternal(url)
+}
 
 // ---- formatting ------------------------------------------------------------
 
@@ -130,6 +140,21 @@ function fmtReleaseDate(raw) {
   // No timeZone option on purpose: the host clock decides the rendered day.
   const at = new Date(Date.UTC(Number(match[1]), month - 1, day))
   return new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric' }).format(at)
+}
+
+// A bare 'YYYY-MM-DD' that is a stated CALENDAR date — an announcement date, a
+// promo end date — is the day it names, not a UTC instant. Build a LOCAL date so
+// the day never shifts: 2026-09-21 reads Sep 21, 2026 in every timezone. This is
+// the opposite of fmtReleaseDate above, which intentionally renders a registry
+// date as UTC midnight on the viewer's clock; do not swap one for the other.
+function fmtCalendarDate(raw) {
+  const match = ISO_DATE_RE.exec(String(raw == null ? '' : raw).trim())
+  if (!match) return null
+  const month = Number(match[2])
+  const day = Number(match[3])
+  if (!(month >= 1 && month <= 12) || !(day >= 1 && day <= 31)) return null
+  return new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+    .format(new Date(Number(match[1]), month - 1, day))
 }
 
 function fmtWindowLength(seconds) {
@@ -461,6 +486,15 @@ function ModelsTable({ models, error }) {
     }).join('; ')
   }
 
+  // The numbered notes above explain the ZDR marks only. The name and cap columns
+  // carry their own marks, so name those here too -- and, like the notes, only the
+  // ones a rendered model actually uses. No mark used, no line.
+  const rendered = capped.concat(uncapped)
+  const legendLines = []
+  if (rendered.some(m => m.price_source === 'catalog')) legendLines.push('† priced from the live catalog, not yet in the docs')
+  if (rendered.some(m => tierTitle(m))) legendLines.push('‡ tiered pricing; hover the model name for the tiers')
+  if (capped.some(m => m.cap_source === 'announcement')) legendLines.push('* cap announced by OpenCode on X, not in the docs')
+
   function NameCell({ m }) {
     const catalogTitle = m.price_source === 'catalog' ? 'Priced from the live catalog; not yet listed in the docs' : null
     const tier = tierTitle(m)
@@ -499,8 +533,11 @@ function ModelsTable({ models, error }) {
     return text == null ? { right: true, title: NOT_PUBLISHED, children: DASH } : { right: true, children: text }
   }
 
+  // A raised footnote mark must not touch the value it follows: with no margin a
+  // right-aligned tabular-nums cell reads '0d1' / 'No2' as a wrong number. The
+  // margin lives here, so both call sites get it.
   function superMark(text) {
-    return jsx('span', { className: 'align-super text-[0.5rem]', children: text })
+    return jsx('span', { className: 'ml-0.5 align-super text-[0.5rem]', children: text })
   }
 
   // Cap: 'no cap' when the docs publish none, a superscript star when the number
@@ -581,7 +618,7 @@ function ModelsTable({ models, error }) {
           jsx(Button, {
             variant: 'outline',
             size: 'xs',
-            onClick: () => window.open(payload.docs_url, '_blank', 'noopener'),
+            onClick: () => openExternal(payload.docs_url),
             children: 'Go docs'
           })
         ]
@@ -595,6 +632,9 @@ function ModelsTable({ models, error }) {
               const after = p.monthly_usd != null ? fmtCap(p.monthly_usd) : null
               return jsx('span', {
                 key: p.model_key,
+                className: 'cursor-pointer hover:underline',
+                title: 'Promo from the OpenCode Go docs: ' + payload.docs_url,
+                onClick: () => openExternal(payload.docs_url),
                 children: p.name + ' — ' + p.label + (before && after ? ' (' + before + ' → ' + after + ' cap)' : '')
               })
             })
@@ -608,8 +648,8 @@ function ModelsTable({ models, error }) {
               key: a.model_key,
               title: a.source,
               className: 'cursor-pointer hover:underline',
-              onClick: () => window.open(a.source, '_blank', 'noopener'),
-              children: a.name + ' — ' + a.note + ' (announced ' + a.date + ')'
+              onClick: () => openExternal(a.source),
+              children: a.name + ' — ' + a.note + ' (announced ' + (fmtCalendarDate(a.date) || a.date) + ')'
             }))
           })
         : null,
@@ -657,6 +697,13 @@ function ModelsTable({ models, error }) {
         ? jsx('div', {
             className: 'flex flex-col gap-1 text-[0.6875rem] text-(--ui-text-quaternary)',
             children: noteLines.map((n, i) => jsx('div', { key: n.key, children: (i + 1) + ' ' + n.label + ': ' + n.text }))
+          })
+        : null,
+
+      legendLines.length
+        ? jsx('div', {
+            className: 'text-[0.6875rem] text-(--ui-text-quaternary)',
+            children: legendLines.map((line, i) => jsx('div', { key: i, children: line }))
           })
         : null,
 
@@ -746,7 +793,7 @@ function UsagePage() {
           jsx(Button, {
             variant: 'outline',
             size: 'xs',
-            onClick: () => window.open(CONSOLE_URL, '_blank', 'noopener'),
+            onClick: () => openExternal(CONSOLE_URL),
             children: 'Console'
           }),
           jsx(Button, {
@@ -868,6 +915,7 @@ export default {
   id: ID, // must match the folder name
   name: 'OpenCode Go Usage',
   register(ctx) {
+    pluginCtx = ctx
     async function runScript(scriptName) {
       if (SCRIPTS_DIR.startsWith('__HERMES')) {
         throw new Error('run install.sh on the gateway')
