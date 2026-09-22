@@ -89,7 +89,7 @@ console.log('\nTABLE:', table ? table[0] : '(no table)')
 const zdrHeader = /Model\s+Released\s+In\s+Out\s+Cache\s+Cap\s+≈ Req\/mo\s+ZDR/.test(out.text)
 const zdrCells = { zero: (out.text.match(/\b0d\b/g) || []).length, thirty: (out.text.match(/\b30d\b/g) || []).length, no: (out.text.match(/\bNo\b/g) || []).length }
 const dated = (out.text.match(/[A-Z][a-z]{2} \d{1,2}, \d{4}/g) || []).length
-const announcement = /Omen Alpha — Go-only stealth model: \$100 of usage on the \$10 plan \(announced 2026-09-04\)/.test(out.text)
+const announcement = /Omen Alpha — Go-only stealth model: \$100 of usage on the \$10 plan \(announced Sep 4, 2026\)/.test(out.text)
 console.log('ZDR column header:', zdrHeader, JSON.stringify(zdrCells))
 console.log('released dates rendered:', dated)
 console.log('Omen Alpha announcement:', announcement)
