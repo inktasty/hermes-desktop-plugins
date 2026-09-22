@@ -50,6 +50,20 @@ A brand-new plugin folder is not always noticed by a running app. If a chip
 does not appear, run **Reload desktop plugins** from the command palette (⌘K /
 Ctrl+K). Editing a file inside an already-loaded plugin hot-reloads in seconds.
 
+### Deploying to the app machine (remote gateway)
+
+When the app's gateway is remote from the app (the app on Windows, the gateway
+elsewhere), run this from a clone of the repo **on the app machine**:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy-windows.ps1
+```
+
+It replaces `__HERMES_SCRIPTS__` with the **gateway's** scripts path
+(`/home/ubuntu/.hermes/scripts` by default, never a Windows path), so pass
+`-ScriptsDir` when that gateway home differs. Files already identical are left
+alone and printed as `unchanged`.
+
 ### No manual path edits needed
 
 `install.sh` replaces the script directory token in the plugins with your
