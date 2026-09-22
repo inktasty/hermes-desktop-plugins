@@ -113,21 +113,23 @@ function fmtStamp(iso) {
   }).format(new Date(t))
 }
 
-// A registry release_date is a bare 'YYYY-MM-DD' in UTC with no time of day.
-// Format it through the regex and the month table below, NEVER through
-// new Date() + a local formatter: a bare date parses as UTC midnight, which in
-// any zone west of UTC (America/Phoenix, UTC-7) renders the PREVIOUS day. The
-// registry value is reported as published, never clamped or shifted.
-const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+// The registry stores a release_date as a bare 'YYYY-MM-DD' in UTC, with no time
+// of day. We render that date as UTC midnight on the VIEWER's clock, so west of
+// UTC (America/Phoenix, UTC-7) it lands on the previous day: a registry date of
+// 2026-09-22 shows here as Sep 21, 2026. That is intended, because it is the day
+// the release actually reached this machine. Do NOT "fix" it back to the raw
+// registry string, and do not clamp it to today.
 const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
 
 function fmtReleaseDate(raw) {
   const match = ISO_DATE_RE.exec(String(raw == null ? '' : raw).trim())
   if (!match) return null
-  const month = MONTH_ABBR[Number(match[2]) - 1]
+  const month = Number(match[2])
   const day = Number(match[3])
-  if (!month || !(day >= 1 && day <= 31)) return null
-  return month + ' ' + day + ', ' + match[1]
+  if (!(month >= 1 && month <= 12) || !(day >= 1 && day <= 31)) return null
+  // No timeZone option on purpose: the host clock decides the rendered day.
+  const at = new Date(Date.UTC(Number(match[1]), month - 1, day))
+  return new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric' }).format(at)
 }
 
 function fmtWindowLength(seconds) {

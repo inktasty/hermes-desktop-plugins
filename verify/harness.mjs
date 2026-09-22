@@ -231,10 +231,21 @@ function packPayload(payload) {
   return JSON.stringify({ ok: payload.ok, gzip: gzipSync(Buffer.from(line)).toString('base64') })
 }
 
+// A registry release_date is a bare 'YYYY-MM-DD' in UTC. The plugins render it as
+// UTC midnight on the VIEWER's clock, so west of UTC the rendered day is the day
+// before. Build the expected label here from a DIFFERENT api (toLocaleDateString,
+// not the plugin's Intl.DateTimeFormat) with no fixed timeZone, so the oracle
+// follows whatever zone the harness itself runs in.
+function viewerDateLabel(iso) {
+  const [y, m, d] = iso.split('-').map(Number)
+  return new Date(Date.UTC(y, m - 1, d))
+    .toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
 // Release dates as the models.dev registry publishes them: bare YYYY-MM-DD.
 // 'low-cap' stays null so the table's "not in the model registry" dash is
-// exercised; 'promo-model' carries the same-day-in-UTC date that a local-time
-// formatter would render as the previous day west of UTC.
+// exercised; 'promo-model' is a same-day release and 'cap-no-promo' an older one,
+// so the Released column is checked against viewerDateLabel for both.
 const FIXTURE_RELEASES = {
   'promo-model': '2026-09-22',
   'cap-no-promo': '2026-04-24',
@@ -669,7 +680,8 @@ async function testSessionUsage() {
   // payload carries no input/output at all. It must parse (the old parseRates
   // rejected it), show the date, and never render a rates block or a row of
   // dashed rates.
-  const dateMod = (await loadPlugin('session-usage', { fresh: 3, scriptsDir: '/tmp/hdp-test/scripts' })).mod
+  const dateLoad = await loadPlugin('session-usage', { fresh: 3, scriptsDir: '/tmp/hdp-test/scripts' })
+  const dateMod = dateLoad.mod
   const dateOnlyLine = JSON.stringify({
     ok: true, provider: 'opencode-go', requested_provider: 'opencode-go',
     model: 'mimo-v2.6-flash', unit: 'usd_per_million_tokens', released: '2026-09-22'
@@ -690,7 +702,7 @@ async function testSessionUsage() {
   if (typeof dateFetch === 'function') await dateFetch()
   await settle()
   const dateOut = render(dateCtx.contributions[0].render)
-  check('date-only payload renders the registry date', /Sep 22, 2026/.test(dateOut.text), dateOut.text)
+  check('date-only payload renders the registry date in the viewer zone', dateOut.text.includes(viewerDateLabel('2026-09-22')), dateOut.text)
   check('date-only payload never renders a rates block', !/Rates per 1M tokens/.test(dateOut.text), dateOut.text)
   check('date-only payload never renders dashed rates', !/in — out — cache —/.test(dateOut.text), dateOut.text)
   check('date-only payload renders with no error', !dateOut.err, dateOut.err && dateOut.err.message)
@@ -701,8 +713,8 @@ async function testSessionUsage() {
     rates: { ok: true, provider: 'opencode-go', model: 'mimo-v2.6-flash', released: '2026-09-22', input: 0.14, output: 0.28, cache_read: 0.0028 }
   })
   check('a dated, priced model shows the date and the rates',
-    /Sep 22, 2026/.test(bothOut.text) && /Rates per 1M tokens/.test(bothOut.text), bothOut.text)
-  check('the panel date is never shifted a day west of UTC', !/Sep 21, 2026/.test(bothOut.text), bothOut.text)
+    bothOut.text.includes(viewerDateLabel('2026-09-22')) && /Rates per 1M tokens/.test(bothOut.text), bothOut.text)
+  check('the panel date no longer comes from a month table', !dateLoad.source.includes('MONTH_ABBR'))
   Date.now = realNow
 
   // older build: capability atoms absent
@@ -823,10 +835,14 @@ async function testOpencodeUsage() {
   check('grid sits in an overflow-x-auto container', source.includes("'overflow-x-auto'"))
   check('every column has a header cell', /Model\s+Released\s+In\s+Out\s+Cache\s+Cap\s+≈ Req\/mo\s+ZDR/.test(pageOut.text), pageOut.text.slice(0, 700))
 
-  // Released column: the registry date, formatted without a timezone shift, and
-  // a dash that names the reason when the registry publishes no date.
-  check('released column renders the registry date', /Sep 22, 2026/.test(pageOut.text), pageOut.text)
-  check('a UTC date is never shifted a day by the local zone', !/Sep 21, 2026/.test(pageOut.text), pageOut.text)
+  // Released column: the registry date rendered on the viewer's clock (the day
+  // before, west of UTC), and a dash that names the reason when the registry
+  // publishes no date.
+  check('released column renders the registry date in the viewer zone',
+    pageOut.text.includes(viewerDateLabel('2026-09-22')), pageOut.text)
+  check('an older registry date is shifted the same way',
+    pageOut.text.includes(viewerDateLabel('2026-04-24')), pageOut.text)
+  check('the released column no longer comes from a month table', !source.includes('MONTH_ABBR'), source.slice(0, 60))
   check('a model with no registry date is a dash that says why',
     pageOut.titles.includes('not in the model registry, so it has no published release date'), JSON.stringify(pageOut.titles))
   check('the stored models payload key was bumped for the new column', source.includes("'models_v2'") && !source.includes("'models_v1'"), source.slice(0, 60))
