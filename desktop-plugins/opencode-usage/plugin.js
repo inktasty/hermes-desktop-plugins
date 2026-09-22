@@ -439,10 +439,11 @@ function WindowColumn({ win, now, first }) {
 
 // ---- model list controls ---------------------------------------------------
 //
-// The bar above the models table sorts one key at a time and stacks a ZDR-only
-// toggle and a name search on top of it. Both rules are pure functions, and both
-// are exported so the probe can exercise them without a render — the grouping,
-// the footnote numbering and the legend lines all run on their output.
+// The bar above the models table takes TWO sort keys at once — cost and release
+// date — plus a swap control saying which of the two leads, and stacks a ZDR-only
+// toggle and a name search on top of them. The ordering rule is a pure function,
+// exported so the probe can exercise it without a render — the grouping, the
+// footnote numbering and the legend lines all run on its output.
 
 const SORT_DEFAULT = 'default'
 const SORT_COST_ASC = 'cost-asc'
@@ -470,34 +471,81 @@ function modelRate(m) {
   return null
 }
 
+/** 'asc' | 'desc' for one control's value. Default is not a direction. */
+function sortDirOf(value) {
+  return value === SORT_COST_DESC || value === SORT_RELEASED_DESC ? 'desc' : 'asc'
+}
+
+/** The value one key sorts on: a number for cost, a bare date string for release. */
+function sortValueOf(m, key) {
+  if (key === 'cost') return modelRate(m)
+  return typeof m.released === 'string' ? m.released : null
+}
+
 /**
- * Orders a copy of `list`. `key` is 'cost' or 'released'; `dir` is 'asc' or
- * 'desc'; any other key hands back the payload's own order untouched.
+ * Compares two models on ONE key. A model with no rate (or no registry date)
+ * sinks to the END in both directions: a missing number is not a low number, and
+ * a model with no published date is not the newest one. Equal values compare 0,
+ * so the caller falls through to the next key and everything behind a tie keeps
+ * its relative order.
+ */
+function compareKey(a, b, key, dir) {
+  const x = sortValueOf(a, key)
+  const y = sortValueOf(b, key)
+  if (x == null && y == null) return 0
+  if (x == null) return 1
+  if (y == null) return -1
+  if (x === y) return 0
+  const less = x < y
+  return (dir === 'desc' ? !less : less) ? -1 : 1
+}
+
+/** The last-resort tiebreak: the display name, so rows equal on every active key
+ *  come out in one fixed order instead of whatever order they happened to have. */
+function compareName(a, b) {
+  const x = String(a && a.name != null ? a.name : '')
+  const y = String(b && b.name != null ? b.name : '')
+  if (x === y) return 0
+  return x < y ? -1 : 1
+}
+
+/**
+ * Orders a copy of `list` by the keys the bar has active, in priority order —
+ * `sorts` is e.g. [{key:'cost',dir:'asc'},{key:'released',dir:'asc'}]. No active
+ * key hands back the payload's own order untouched.
  *
- * A model with no rate (or no registry date) sinks to the END in both
- * directions: a missing number is not a low number, and a model with no
- * published date is not the newest one.
+ * With ONE key, rows equal on it keep the payload's order (a stable sort): that
+ * is exactly what the single-key sort has always done. With BOTH keys, rows equal
+ * on both fall back to the display name so they never swap between renders.
  *
  * `released` is a bare 'YYYY-MM-DD' from the models.dev registry, so it compares
  * as a STRING. The Released column renders it on the viewer's clock on purpose;
  * the ordering must not, or west of UTC the sort would disagree with the column.
  */
-export function sortModels(list, key, dir) {
+export function sortModelsMulti(list, sorts) {
   const out = (list || []).slice()
-  const byCost = key === 'cost'
-  const byReleased = key === 'released'
-  if (!byCost && !byReleased) return out
-  const descending = dir === 'desc'
+  const active = (sorts || []).filter(s => s && (s.key === 'cost' || s.key === 'released'))
+  if (!active.length) return out
+  const primary = active[0]
+  const secondary = active[1] || null
   out.sort((a, b) => {
-    const x = byCost ? modelRate(a) : typeof a.released === 'string' ? a.released : null
-    const y = byCost ? modelRate(b) : typeof b.released === 'string' ? b.released : null
-    if (x == null && y == null) return 0
-    if (x == null) return 1
-    if (y == null) return -1
-    if (x === y) return 0
-    return (descending ? x > y : x < y) ? -1 : 1
+    const byPrimary = compareKey(a, b, primary.key, primary.dir)
+    if (byPrimary) return byPrimary
+    if (!secondary) return 0
+    const bySecondary = compareKey(a, b, secondary.key, secondary.dir)
+    if (bySecondary) return bySecondary
+    return compareName(a, b)
   })
   return out
+}
+
+/**
+ * Single-key wrapper, kept for callers and probes that want one key. `key` is
+ * 'cost' or 'released'; any other key hands back the payload's own order.
+ */
+export function sortModels(list, key, dir) {
+  if (key !== 'cost' && key !== 'released') return (list || []).slice()
+  return sortModelsMulti(list, [{ key, dir }])
 }
 
 /** The rows the bar asks for: a ZDR-only toggle and a case-insensitive name
@@ -523,7 +571,22 @@ export function ModelsTable({ models, error, initialControls }) {
   // a given control state so the empty state and the grouping can be checked
   // without a live React. The app never passes it.
   const seed = initialControls || {}
-  const [sort, setSort] = useState(typeof seed.sort === 'string' ? seed.sort : SORT_DEFAULT)
+  // The probe seeds control state directly, because its React stub does not run
+  // handlers. `sort` is the single-key seed the older probes still pass: it
+  // selects ONE control and leaves the other on Default, exactly as picking that
+  // control used to. `costSort` / `releasedSort` set both, and `leader` says which
+  // one is primary when both are set.
+  const seedCost = typeof seed.costSort === 'string'
+    ? seed.costSort
+    : seed.sort === SORT_COST_ASC || seed.sort === SORT_COST_DESC ? seed.sort : SORT_DEFAULT
+  const seedReleased = typeof seed.releasedSort === 'string'
+    ? seed.releasedSort
+    : seed.sort === SORT_RELEASED_ASC || seed.sort === SORT_RELEASED_DESC ? seed.sort : SORT_DEFAULT
+  const [costSort, setCostSort] = useState(seedCost)
+  const [releasedSort, setReleasedSort] = useState(seedReleased)
+  // Which of the two keys leads when both are set. Cost leads until the swap
+  // control flips it; the swap is the only writer.
+  const [leader, setLeader] = useState(seed.leader === 'released' ? 'released' : 'cost')
   const [zdrOnly, setZdrOnly] = useState(seed.zdrOnly === true)
   const [query, setQuery] = useState(typeof seed.query === 'string' ? seed.query : '')
 
@@ -546,22 +609,34 @@ export function ModelsTable({ models, error, initialControls }) {
   }
   const list = payload.models || []
 
-  const sortKey = sort === SORT_COST_ASC || sort === SORT_COST_DESC
-    ? 'cost'
-    : sort === SORT_RELEASED_ASC || sort === SORT_RELEASED_DESC
-      ? 'released'
-      : null
-  const sortDir = sort === SORT_COST_DESC || sort === SORT_RELEASED_DESC ? 'desc' : 'asc'
-  // Each control shows its own key as selected, or 'Default' when the OTHER
-  // control holds the one active sort.
-  const costSortValue = sortKey === 'cost' ? sort : SORT_DEFAULT
-  const releasedSortValue = sortKey === 'released' ? sort : SORT_DEFAULT
+  // Each control owns its own key, so both can be set at once. When both are, the
+  // swap control says which one leads; with a single key active that key is the
+  // whole comparator, unchanged from the one-at-a-time bar.
+  const costActive = costSort !== SORT_DEFAULT
+  const releasedActive = releasedSort !== SORT_DEFAULT
+  const bothSorts = costActive && releasedActive
+  const activeSorts = []
+  if (bothSorts) {
+    const costEntry = { key: 'cost', dir: sortDirOf(costSort) }
+    const releasedEntry = { key: 'released', dir: sortDirOf(releasedSort) }
+    activeSorts.push(...(leader === 'released' ? [releasedEntry, costEntry] : [costEntry, releasedEntry]))
+  } else if (costActive) {
+    activeSorts.push({ key: 'cost', dir: sortDirOf(costSort) })
+  } else if (releasedActive) {
+    activeSorts.push({ key: 'released', dir: sortDirOf(releasedSort) })
+  }
+  // The swap control is only meaningful with both keys set, so it exists only
+  // then — and its label is the effective order it would flip.
+  const orderLabel = leader === 'released' ? 'released, then cost' : 'cost, then released'
+  const rankLabel = (base, rank) => (rank ? base + ' (' + rank + ')' : base)
+  const costRank = bothSorts ? (leader === 'cost' ? '1st' : '2nd') : null
+  const releasedRank = bothSorts ? (leader === 'released' ? '1st' : '2nd') : null
 
   // Order first, then narrow. Everything below — the capped/uncapped grouping,
   // the dividers it draws, the footnote numbering, the legend lines — is
   // computed from what is actually on screen, so a filtered-out model takes its
   // footnote and its mark with it.
-  const shown = filterModels(sortModels(list, sortKey, sortDir), { zdrOnly, query })
+  const shown = filterModels(sortModelsMulti(list, activeSorts), { zdrOnly, query })
   // An empty payload is not the same thing as a filter that hid every row: only
   // claim the controls matched nothing when there was something to match.
   const nothingMatches = list.length > 0 && shown.length === 0
@@ -796,15 +871,33 @@ export function ModelsTable({ models, error, initialControls }) {
               jsxs('div', {
                 className: 'flex items-center gap-1.5 text-[0.6875rem] text-(--ui-text-quaternary)',
                 children: [
-                  jsx('span', { children: 'Sort cost' }),
-                  jsx(SegmentedControl, { options: COST_SORT_OPTIONS, value: costSortValue, onChange: setSort })
+                  jsx('span', { children: rankLabel('Sort cost', costRank) }),
+                  jsx(SegmentedControl, { options: COST_SORT_OPTIONS, value: costSort, onChange: setCostSort })
                 ]
               }),
+              // Between the two controls, and only when both are set: with one key
+              // (or none) there is no priority to flip, and a control that looks
+              // live but is not is worse than no control.
+              bothSorts
+                ? jsxs('div', {
+                    className: 'flex items-center gap-1.5 text-[0.6875rem] text-(--ui-text-quaternary)',
+                    children: [
+                      jsx(Button, {
+                        variant: 'outline',
+                        size: 'xs',
+                        title: 'Swap which sort leads',
+                        'aria-label': 'Swap which sort leads: ' + orderLabel,
+                        onClick: () => setLeader(prev => (prev === 'released' ? 'cost' : 'released')),
+                        children: orderLabel
+                      })
+                    ]
+                  })
+                : null,
               jsxs('div', {
                 className: 'flex items-center gap-1.5 text-[0.6875rem] text-(--ui-text-quaternary)',
                 children: [
-                  jsx('span', { children: 'Sort released' }),
-                  jsx(SegmentedControl, { options: RELEASED_SORT_OPTIONS, value: releasedSortValue, onChange: setSort })
+                  jsx('span', { children: rankLabel('Sort released', releasedRank) }),
+                  jsx(SegmentedControl, { options: RELEASED_SORT_OPTIONS, value: releasedSort, onChange: setReleasedSort })
                 ]
               }),
               jsxs('div', {

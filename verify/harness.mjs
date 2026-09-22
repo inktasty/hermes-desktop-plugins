@@ -1094,6 +1094,135 @@ async function testOpencodeUsage() {
     searchText.includes('Omen Alpha') && !searchText.includes('Promo Model') && !searchText.includes('Cap No Promo'),
     searchText.slice(0, 200))
 
+  // ---- two sort keys at once (t_914d3041) ------------------------------------
+  // Cost and release date compose: both controls can be set, and a swap control
+  // says which of the two leads. `sortModelsMulti(list, sorts)` is the comparator;
+  // `sortModels(list, key, dir)` stays the one-key wrapper, so the checks above
+  // are the regression guard for the single-key behavior.
+  check('the plugin exports the composed comparator alongside the one-key wrapper',
+    typeof ns.sortModelsMulti === 'function', typeof ns.sortModelsMulti)
+
+  const idsOf = list => list.map(m => m.id)
+  const idSeq = sorts => idsOf(ns.sortModelsMulti(rows, sorts))
+
+  // 1. cost leads, release date breaks the tie.
+  const costThenReleased = idSeq([{ key: 'cost', dir: 'asc' }, { key: 'released', dir: 'asc' }])
+  check('cost-then-released puts the cheapest model first',
+    costThenReleased[0] === 'promo-model', costThenReleased.join(' '))
+  check('cost-then-released breaks an equal input rate with the older release date',
+    costThenReleased.indexOf('catalog-priced') < costThenReleased.indexOf('omen-alpha')
+      && costThenReleased.indexOf('promo-model') < costThenReleased.indexOf('low-cap'),
+    costThenReleased.join(' '))
+
+  // 2. The same two controls, opposite priority: the swap changes the comparator.
+  const releasedThenCost = ns.sortModelsMulti(rows, [{ key: 'released', dir: 'desc' }, { key: 'cost', dir: 'desc' }])
+  const costThenReleasedDesc = ns.sortModelsMulti(rows, [{ key: 'cost', dir: 'desc' }, { key: 'released', dir: 'desc' }])
+  check('swapping the lead changes which model comes first',
+    idsOf(releasedThenCost)[0] === 'promo-model' && idsOf(costThenReleasedDesc)[0] === 'cap-no-promo',
+    idsOf(releasedThenCost).join(' ') + ' | ' + idsOf(costThenReleasedDesc).join(' '))
+  check('swapping the lead reorders the same rows',
+    JSON.stringify(idsOf(releasedThenCost)) !== JSON.stringify(idsOf(costThenReleasedDesc)),
+    idsOf(releasedThenCost).join(' '))
+  check('the leading key still wins on the tie behind it',
+    idsOf(releasedThenCost).indexOf('low-cap') > idsOf(releasedThenCost).indexOf('cap-no-promo')
+      && idsOf(costThenReleasedDesc).indexOf('low-cap') > idsOf(costThenReleasedDesc).indexOf('promo-model'),
+    idsOf(releasedThenCost).join(' '))
+
+  // 3. One key active is the single-key sort, unchanged.
+  check('one key set is the same comparator as the single-key sort',
+    JSON.stringify(idSeq([{ key: 'cost', dir: 'asc' }])) === JSON.stringify(idsOf(ns.sortModels(rows, 'cost', 'asc')))
+      && JSON.stringify(idSeq([{ key: 'cost', dir: 'desc' }])) === JSON.stringify(idsOf(ns.sortModels(rows, 'cost', 'desc')))
+      && JSON.stringify(idSeq([{ key: 'released', dir: 'asc' }])) === JSON.stringify(idsOf(ns.sortModels(rows, 'released', 'asc')))
+      && JSON.stringify(idSeq([{ key: 'released', dir: 'desc' }])) === JSON.stringify(idsOf(ns.sortModels(rows, 'released', 'desc'))))
+  check('a single key leaves rows that tie in the payload order, as before',
+    JSON.stringify(idSeq([{ key: 'cost', dir: 'asc' }]).slice(0, 2)) === JSON.stringify(['promo-model', 'low-cap']),
+    idSeq([{ key: 'cost', dir: 'asc' }]).join(' '))
+
+  // 4. Both keys on Default reproduces the payload's own order, for every row.
+  const payloadOrder = idsOf(rows)
+  check('both keys on Default keep the payload order for every row',
+    JSON.stringify(idSeq([])) === JSON.stringify(payloadOrder) && idSeq([]).length === rows.length,
+    idSeq([]).join(' '))
+  const wide = Array.from({ length: 40 }, (_, i) => ({
+    id: 'wide-' + i,
+    name: 'Wide ' + String(i).padStart(2, '0'),
+    input: i % 7 === 0 ? null : (i % 7) / 10,
+    released: i % 5 === 0 ? null : '2026-0' + (1 + (i % 8)) + '-1' + (i % 9)
+  }))
+  check('both keys on Default keep the payload order for a 40-row list too',
+    JSON.stringify(idsOf(ns.sortModelsMulti(wide, []))) === JSON.stringify(idsOf(wide)),
+    idsOf(ns.sortModelsMulti(wide, [])).slice(0, 6).join(' '))
+  check('no active key at all leaves the input untouched',
+    JSON.stringify(idsOf(ns.sortModelsMulti(wide, [{ key: 'default', dir: 'asc' }]))) === JSON.stringify(idsOf(wide)))
+
+  // 5. A missing value sinks last in both directions, for both keys.
+  const ascCost = idSeq([{ key: 'cost', dir: 'asc' }])
+  const descCost = idSeq([{ key: 'cost', dir: 'desc' }])
+  const ascReleased = idSeq([{ key: 'released', dir: 'asc' }])
+  const descReleased = idSeq([{ key: 'released', dir: 'desc' }])
+  check('a model with no rate sinks last, whichever way cost sorts',
+    ascCost[ascCost.length - 1] === 'served-no-price' && descCost[descCost.length - 1] === 'served-no-price',
+    ascCost.join(' ') + ' | ' + descCost.join(' '))
+  check('a model with no registry date sinks last, whichever way released sorts',
+    ascReleased.slice(-2).sort().join(',') === 'low-cap,served-no-price'
+      && descReleased.slice(-2).sort().join(',') === 'low-cap,served-no-price',
+    ascReleased.join(' ') + ' | ' + descReleased.join(' '))
+  check('a missing secondary value sinks last inside its tie too',
+    costThenReleased.indexOf('served-no-price') === costThenReleased.length - 1
+      && costThenReleased.indexOf('promo-model') < costThenReleased.indexOf('low-cap'),
+    costThenReleased.join(' '))
+
+  // 6. Rows equal on both keys come out in one fixed (name) order.
+  const tiedRows = [
+    { id: 'tie-c', name: 'Charlie', input: 0.3, released: '2026-01-01' },
+    { id: 'tie-a', name: 'Alpha', input: 0.3, released: '2026-01-01' },
+    { id: 'tie-b', name: 'Bravo', input: 0.3, released: '2026-01-01' },
+    { id: 'tie-d', name: 'Delta', input: 0.3, released: '2026-01-01' }
+  ]
+  const tiredRunOne = idsOf(ns.sortModelsMulti(tiedRows, [{ key: 'cost', dir: 'asc' }, { key: 'released', dir: 'desc' }]))
+  const tiredRunTwo = idsOf(ns.sortModelsMulti(tiedRows, [{ key: 'cost', dir: 'asc' }, { key: 'released', dir: 'desc' }]))
+  // Not the payload order (tie-c first): the name tiebreak is what decides.
+  check('rows equal on both keys come out in deterministic name order',
+    tiredRunOne.join(',') === 'tie-a,tie-b,tie-c,tie-d' && tiredRunTwo.join(',') === tiredRunOne.join(','),
+    tiredRunOne.join(','))
+
+  // The bar as the page renders it with both keys set.
+  const orderIn = text => rows.map(m => m.name).slice().sort((a, b) => text.indexOf(a) - text.indexOf(b))
+  const bothOut = render(ns.ModelsTable, {
+    models: modelsPayload, error: null, initialControls: { costSort: 'cost-asc', releasedSort: 'released-asc' }
+  })
+  const swapBtn = primOf(bothOut, 'Button').find(b => b.props.children === 'cost, then released')
+  check('both keys set render the effective order and a wired swap control',
+    Boolean(swapBtn) && typeof swapBtn.props.onClick === 'function', bothOut.text.slice(0, 160))
+  check('the labels carry the effective priority when both keys are set',
+    /Sort cost \(1st\)/.test(bothOut.text) && /Sort released \(2nd\)/.test(bothOut.text), bothOut.text.slice(0, 160))
+  check('cost-led table order matches the comparator',
+    orderIn(tableText(bothOut)).join('|') === 'Promo Model|Low Cap|Omen Alpha|Tiered Model|Cap No Promo|Catalog Priced|Served No Price',
+    orderIn(tableText(bothOut)).join('|'))
+
+  const leadOut = render(ns.ModelsTable, {
+    models: modelsPayload, error: null, initialControls: { costSort: 'cost-asc', releasedSort: 'released-asc', leader: 'released' }
+  })
+  check('the swap flips the label to the other order',
+    /released, then cost/.test(leadOut.text) && !/cost, then released/.test(leadOut.text), leadOut.text.slice(0, 160))
+  check('the swapped table order matches the flipped comparator',
+    orderIn(tableText(leadOut)).join('|') === 'Cap No Promo|Tiered Model|Omen Alpha|Promo Model|Low Cap|Catalog Priced|Served No Price',
+    orderIn(tableText(leadOut)).join('|'))
+
+  // Only meaningful with both keys set: with one key (or none) the control is gone.
+  const singleOut = render(ns.ModelsTable, {
+    models: modelsPayload, error: null, initialControls: { costSort: 'cost-asc', releasedSort: 'default' }
+  })
+  check('the swap control is absent when a key sits on Default',
+    !/then cost|then released/.test(singleOut.text)
+      && !primOf(singleOut, 'Button').some(b => /then/.test(String(b.props.children))),
+    singleOut.text.slice(0, 160))
+  check('a lone key set renders no priority rank either',
+    !/\(1st\)|\(2nd\)/.test(singleOut.text) && /Sort cost/.test(singleOut.text), singleOut.text.slice(0, 160))
+  check('a lone key reproduces the single-key table order exactly',
+    orderIn(tableText(singleOut)).join('|') === orderIn(costText).join('|'),
+    orderIn(tableText(singleOut)).join('|'))
+
   const counts = []
   for (const label of ['first', 'second', 'third']) {
     counts.push(render(chip.render).hooks)
