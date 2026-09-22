@@ -308,7 +308,17 @@ function SessionPanel({ u, est, error, rates }) {
       className: 'flex items-center justify-between',
       children: [
         jsx('span', { className: 'font-semibold text-foreground', children: 'This session' }),
-        u.model ? jsx('span', { className: 'max-w-[150px] truncate text-[10px] text-(--ui-text-tertiary)', title: u.model, children: u.model }) : null
+        u.model
+          ? jsx('span', {
+              className: 'truncate text-[10px] text-(--ui-text-tertiary)',
+              // Inline cap: a max-width utility class would not be compiled by the
+              // app (Tailwind never scans plugin files), so truncate had no width
+              // to work against.
+              style: { maxWidth: '150px' },
+              title: u.model,
+              children: u.model
+            })
+          : null
       ]
     }),
     // The model's registry release date, directly under the header row, so it
