@@ -819,7 +819,7 @@ async function testOpencodeUsage() {
   check('chip shows three window percentages', chipOut.text.includes(wantPct), 'want ' + wantPct + ' got ' + chipOut.text)
   const pageOut = await waitForText(page.render, /Models on Go\s*7/)
   check('page renders three window columns', primOf(pageOut, 'StatusDot').length >= 3, String(primOf(pageOut, 'StatusDot').length))
-  check('page shows reset countdowns', /Resets in/.test(pageOut.text), pageOut.text.slice(0, 200))
+  check('page shows reset countdowns', /This window resets in/.test(pageOut.text), pageOut.text.slice(0, 200))
   check('page flags the monthly window ahead of pace', /Ahead of pace/.test(pageOut.text), pageOut.text.slice(0, 300))
   check('page shows the next-reset summary', /Next reset in/.test(pageOut.text), pageOut.text.slice(0, 200))
   check('page has no render error', !pageOut.err, pageOut.err && pageOut.err.message)

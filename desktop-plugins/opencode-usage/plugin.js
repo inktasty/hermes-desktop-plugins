@@ -366,7 +366,7 @@ function WindowColumn({ win, now, first }) {
             children: used == null ? '--' : String(used)
           }),
           jsx('span', { className: 'text-sm font-medium text-(--ui-text-secondary)', children: '%' }),
-          jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-quaternary)', children: 'of window used' })
+          jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-quaternary)', children: 'of the quota spent' })
         ]
       }),
       Gauge({ used, elapsed: win.elapsed_percent }),
@@ -377,7 +377,7 @@ function WindowColumn({ win, now, first }) {
             className: 'flex items-center gap-1',
             children: [
               jsx('span', { className: 'inline-block h-1.5 w-3 rounded-full bg-(--ui-accent)' }),
-              'quota used'
+              'quota spent'
             ]
           }),
           win.elapsed_percent == null
@@ -386,7 +386,7 @@ function WindowColumn({ win, now, first }) {
                 className: 'flex items-center gap-1',
                 children: [
                   jsx('span', { className: 'inline-block h-1.5 w-3 rounded-full bg-(--ui-stroke-primary)' }),
-                  'window elapsed ' + pctText(win.elapsed_percent)
+                  'time gone by'
                 ]
               })
         ]
@@ -394,8 +394,8 @@ function WindowColumn({ win, now, first }) {
       jsxs('div', {
         className: 'flex flex-col gap-1 text-[0.6875rem]',
         children: [
-          jsx(Field, { label: 'Resets in', value: resetsMs == null ? '--' : fmtCountdown(resetsMs - now), strong: true }),
-          jsx(Field, { label: 'Resets at', value: fmtResetLocal(win.resets_at, now) })
+          jsx(Field, { label: 'This window resets in', value: resetsMs == null ? '--' : fmtCountdown(resetsMs - now), strong: true }),
+          jsx(Field, { label: 'Reset happens', value: fmtResetLocal(win.resets_at, now) })
         ]
       }),
       verdict
@@ -433,14 +433,14 @@ function WindowColumn({ win, now, first }) {
         ? jsxs('div', {
             className: 'flex flex-col gap-1 border-t border-(--ui-stroke-tertiary) pt-2 text-[0.6875rem]',
             children: [
-              jsx(Field, { label: 'Remaining quota', value: pctText(win.remaining_percent) }),
+              jsx(Field, { label: 'Quota left', value: pctText(win.remaining_percent) }),
               jsx(Field, { label: 'Window length', value: fmtWindowLength(win.window_seconds) }),
-              jsx(Field, { label: 'Window started', value: win.window_start ? fmtStamp(win.window_start) : 'unknown' }),
+              jsx(Field, { label: 'Window opened', value: win.window_start ? fmtStamp(win.window_start) : 'unknown' }),
               win.elapsed_percent == null
                 ? null
-                : jsx(Field, { label: 'Window elapsed', value: pctText(win.elapsed_percent) }),
-              jsx(Field, { label: 'Status', value: win.status || 'unknown', strong: win.status !== 'ok' }),
-              jsx(Field, { label: 'Resets at (UTC)', value: fmtUtcStamp(win.resets_at) })
+                : jsx(Field, { label: 'Window time gone by', value: pctText(win.elapsed_percent) }),
+              jsx(Field, { label: 'Reported status', value: win.status || 'unknown', strong: win.status !== 'ok' }),
+              jsx(Field, { label: 'Reset instant', value: fmtUtcStamp(win.resets_at) })
             ]
           })
         : null
