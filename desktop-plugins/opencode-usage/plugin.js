@@ -126,6 +126,17 @@ function fmtStamp(iso) {
   }).format(new Date(t))
 }
 
+// The same instant stated in UTC, for anyone comparing against the quota API.
+// A readable stamp, never the raw ISO string: 2026-09-22T22:00:00Z is a
+// developer string, not something a UI should print.
+function fmtUtcStamp(iso) {
+  const t = parseMs(iso)
+  if (t == null) return 'unknown'
+  return new Intl.DateTimeFormat(undefined, {
+    timeZone: 'UTC', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit'
+  }).format(new Date(t)) + ' UTC'
+}
+
 // The registry stores a release_date as a bare 'YYYY-MM-DD' in UTC, with no time
 // of day. We render that date as UTC midnight on the VIEWER's clock, so west of
 // UTC (America/Phoenix, UTC-7) it lands on the previous day: a registry date of
@@ -366,7 +377,7 @@ function WindowColumn({ win, now, first }) {
             className: 'flex items-center gap-1',
             children: [
               jsx('span', { className: 'inline-block h-1.5 w-3 rounded-full bg-(--ui-accent)' }),
-              'usage'
+              'quota used'
             ]
           }),
           win.elapsed_percent == null
@@ -375,7 +386,7 @@ function WindowColumn({ win, now, first }) {
                 className: 'flex items-center gap-1',
                 children: [
                   jsx('span', { className: 'inline-block h-1.5 w-3 rounded-full bg-(--ui-stroke-primary)' }),
-                  'time ' + pctText(win.elapsed_percent)
+                  'window elapsed ' + pctText(win.elapsed_percent)
                 ]
               })
         ]
@@ -422,14 +433,14 @@ function WindowColumn({ win, now, first }) {
         ? jsxs('div', {
             className: 'flex flex-col gap-1 border-t border-(--ui-stroke-tertiary) pt-2 text-[0.6875rem]',
             children: [
-              jsx(Field, { label: 'Remaining', value: pctText(win.remaining_percent) }),
-              jsx(Field, { label: 'Window', value: fmtWindowLength(win.window_seconds) }),
-              jsx(Field, { label: 'Started', value: win.window_start ? fmtStamp(win.window_start) : 'unknown' }),
+              jsx(Field, { label: 'Remaining quota', value: pctText(win.remaining_percent) }),
+              jsx(Field, { label: 'Window length', value: fmtWindowLength(win.window_seconds) }),
+              jsx(Field, { label: 'Window started', value: win.window_start ? fmtStamp(win.window_start) : 'unknown' }),
               win.elapsed_percent == null
                 ? null
-                : jsx(Field, { label: 'Time elapsed', value: pctText(win.elapsed_percent) }),
+                : jsx(Field, { label: 'Window elapsed', value: pctText(win.elapsed_percent) }),
               jsx(Field, { label: 'Status', value: win.status || 'unknown', strong: win.status !== 'ok' }),
-              jsx(Field, { label: 'Resets (UTC)', value: win.resets_at || 'unknown' })
+              jsx(Field, { label: 'Resets at (UTC)', value: fmtUtcStamp(win.resets_at) })
             ]
           })
         : null
