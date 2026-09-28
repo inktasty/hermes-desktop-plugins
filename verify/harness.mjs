@@ -965,7 +965,7 @@ async function testOpencodeUsage() {
     && !/tiered pricing/.test(plainOut.text)
     && !/cap announced by OpenCode on X/.test(plainOut.text), plainOut.text)
 
-  // Filter + sort bar (t_5c6ee6d0): the controls above the models table. The two
+  // Filter + sort bar: the controls above the models table. The two
   // rules are exported pure helpers, so they are exercised directly, and the
   // table is then rendered once per control state to prove what happens to the
   // rows, the group divider and the footnote/legend lines. `ns` is the plugin's
@@ -1114,7 +1114,7 @@ async function testOpencodeUsage() {
     searchText.includes('Omen Alpha') && !searchText.includes('Promo Model') && !searchText.includes('Cap No Promo'),
     searchText.slice(0, 200))
 
-  // ---- two sort keys at once (t_914d3041) ------------------------------------
+  // ---- two sort keys at once -------------------------------------------------
   // Cost and release date compose: both controls can be set, and a swap control
   // says which of the two leads. `sortModelsMulti(list, sorts)` is the comparator;
   // `sortModels(list, key, dir)` stays the one-key wrapper, so the checks above
