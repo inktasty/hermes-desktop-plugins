@@ -195,8 +195,8 @@ Two things that bite every new plugin, both learned the hard way:
 2. **A plugin folder is not always noticed by a running app.** Reload desktop
    plugins from the command palette after adding one.
 
-Run the harness under at least two `TZ` values, and add the plugin's own gotchas to
-`docs/learnings/` in the same style as the notes already there.
+Run the harness under at least two `TZ` values before opening a PR. A date that looks
+right in one zone and lands a day early in another is the bug that ships.
 
 ## Credits
 
