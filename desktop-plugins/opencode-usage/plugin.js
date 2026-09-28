@@ -246,7 +246,7 @@ function fmtUtcStamp(iso) {
 
 // The registry stores a release_date as a bare 'YYYY-MM-DD' in UTC, with no time
 // of day. We render that date as UTC midnight on the VIEWER's clock, so west of
-// UTC (America/Phoenix, UTC-7) it lands on the previous day: a registry date of
+// UTC (UTC-7, for example) it lands on the previous day: a registry date of
 // 2026-09-22 shows here as Sep 21, 2026. That is intended, because it is the day
 // the release actually reached this machine. Do NOT "fix" it back to the raw
 // registry string, and do not clamp it to today.

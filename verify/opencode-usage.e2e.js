@@ -118,7 +118,7 @@ function fmtStamp(iso) {
 // A registry release_date is a bare 'YYYY-MM-DD' in UTC with no time of day.
 // Format it through the regex and the month table below, NEVER through
 // new Date() + a local formatter: a bare date parses as UTC midnight, which in
-// any zone west of UTC (America/Phoenix, UTC-7) renders the PREVIOUS day. The
+// any zone west of UTC (UTC-7, for example) renders the PREVIOUS day. The
 // registry value is reported as published, never clamped or shifted.
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 const ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
