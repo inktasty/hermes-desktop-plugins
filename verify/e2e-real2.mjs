@@ -19,7 +19,7 @@ const SRC = process.env.PLUGIN_SRC || path.join(HERE, '..', 'desktop-plugins')
 // an installed copy (no token) is left unchanged.
 // SCRIPTS_DIR overrides; the default is the standard gateway home. HERMES_HOME is
 // deliberately NOT consulted: in a bot/worker shell it names the profile home
-// (/home/ubuntu/.hermes/profiles/<name>), which holds no scripts/ dir.
+// (~/.hermes/profiles/<name>), which holds no scripts/ dir.
 const SCRIPTS_DIR = process.env.SCRIPTS_DIR || path.join(os.homedir(), '.hermes', 'scripts')
 const COPY = path.join(HERE, 'opencode-usage.e2e.gen.js')
 const pluginSource = fs.readFileSync(path.join(SRC, 'opencode-usage', 'plugin.js'), 'utf8')

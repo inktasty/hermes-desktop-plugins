@@ -29,7 +29,9 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..')
 const PLUGIN_DIR = join(ROOT, 'desktop-plugins')
 const ALLOW_FILE = join(HERE, 'class-audit-allow.txt')
-const SRC = process.env.DESKTOP_SRC || '/home/ubuntu/.hermes/hermes-agent/apps/desktop/src'
+// Default to THIS machine's gateway home so the probe carries no author path.
+const SRC = process.env.DESKTOP_SRC ||
+  join((process.env.HOME || process.env.USERPROFILE || ''), '.hermes', 'hermes-agent', 'apps', 'desktop', 'src')
 const SCAN_EXTS = new Set(['.ts', '.tsx', '.css', '.json'])
 
 // ---- plugin side: the class tokens the plugins actually pass -----------------
