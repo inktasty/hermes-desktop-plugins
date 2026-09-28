@@ -83,7 +83,12 @@ foreach ($id in $pluginIds) {
     }
 
     # Point the plugin at the gateway's scripts. Nothing else in the file changes.
-    $content = ([System.IO.File]::ReadAllText($src)).Replace($scriptsToken, $ScriptsDir)
+    # The path is spliced into a SINGLE-QUOTED JS string literal, so a backslash or a
+    # quote in it has to be escaped for the literal first, exactly as install.sh does:
+    # an unescaped quote makes the whole plugin a syntax error, and JS would eat the
+    # backslashes and deploy a mangled path. Backslashes first, then quotes.
+    $scriptsLit = $ScriptsDir.Replace('\', '\\').Replace("'", "\'")
+    $content = ([System.IO.File]::ReadAllText($src)).Replace($scriptsToken, $scriptsLit)
 
     # A clone on Windows may check files out as CRLF (core.autocrlf=true) while the
     # committed blob is LF. The deployed file must stay byte-identical to the

@@ -21,6 +21,11 @@ verify/node_modules/**
 !verify/node_modules/react/index.js
 !verify/node_modules/react/jsx-runtime.js
 !verify/node_modules/react/package.json
+# A real npm install in verify/ drops these next to node_modules, so they would be
+# swept in by a `git add -A` just the same. They are not part of the plugin.
+verify/package.json
+verify/package-lock.json
+verify/npm-shrinkwrap.json
 *.zip
 # local dated backups, worktrees and byte-code are never part of a release
 *.bak-*

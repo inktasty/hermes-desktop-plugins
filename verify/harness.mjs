@@ -162,7 +162,12 @@ async function loadPlugin(id, { fresh = 0, scriptsDir = null } = {}) {
   let source = fs.readFileSync(copyFresh, 'utf8')
   const bad = unsupportedImports(source, ['@hermes/plugin-sdk', 'react', 'react/jsx-runtime'])
   if (scriptsDir) {
-    source = source.replace(/__HERMES_SCRIPTS__/g, scriptsDir)
+    // The path is spliced into a single-quoted JS string literal, so it has to be
+    // escaped for the literal first -- the same rule install.sh and deploy-windows.ps1
+    // follow. Unescaped, a backslash is an (often invalid) escape and a quote ends the
+    // literal, so the copy would not even parse.
+    const lit = String(scriptsDir).replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+    source = source.replace(/__HERMES_SCRIPTS__/g, lit)
     fs.writeFileSync(copyFresh, source)
   }
   const localHash = sha(copyFresh)
@@ -622,6 +627,24 @@ async function testSessionUsage() {
       composed.length > 0 && composed.every(c => c === wantPath || c === wantPath + ' ' + wantArg) &&
         composed.some(c => c === wantPath + ' ' + wantArg),
       JSON.stringify(composed))
+  }
+
+  // A scripts dir can arrive as a backslash path: install.sh and deploy-windows.ps1
+  // both normalise it, but a substitution need not. A drive path is already caught by
+  // the drive-letter clause; the indexOf clause is what covers a backslash path with NO
+  // drive letter, such as a UNC share -- so pin that one, not the easy case.
+  {
+    const { ns: unNs } = await loadPlugin('session-usage', { fresh: 95, scriptsDir: '\\\\srv\\share\\scripts' })
+    check('shell quote: a UNC scripts dir is still a Windows gateway',
+      unNs.shellQuote('a.py') === '"a.py"' && unNs.shellQuote('/x y/a.py') === '"/x y/a.py"',
+      unNs.shellQuote('a.py'))
+    const { ns: drNs } = await loadPlugin('session-usage', { fresh: 97, scriptsDir: 'C:\\hermes\\scripts' })
+    check('shell quote: a drive path with backslashes is a Windows gateway too',
+      drNs.shellQuote('a.py') === '"a.py"', drNs.shellQuote('a.py'))
+    const { ns: qNs } = await loadPlugin('session-usage', { fresh: 96, scriptsDir: "/tmp/it's scripts" })
+    check('shell quote: a quote in the scripts dir survives the literal and is escaped for the shell',
+      qNs.shellQuote("/tmp/it's scripts/a.py") === "'/tmp/it'\\''s scripts/a.py'",
+      qNs.shellQuote("/tmp/it's scripts/a.py"))
   }
 
   // Baseline case with default Linux-style python3 success
