@@ -1021,6 +1021,49 @@ export function ModelsTable({ models, error, initialControls }) {
   })
 }
 
+// One credential's own block: its name (and where it comes from) plus its own
+// three quota windows. The gateway returns one of these per key in the pool, so
+// a two-key account shows both limits instead of only the highest-priority one.
+function KeyBlock({ k, now }) {
+  const wins = windowList({ windows: k.windows })
+  const failed = k.ok === false || wins.length === 0
+  // The pool benched this key at some point (e.g. 'exhausted'): worth saying,
+  // because the windows below may then read 'rate-limited' while the key is
+  // simply not the one serving traffic.
+  const poolNote = k.pool_status && k.pool_status !== 'ok' ? String(k.pool_status) : null
+  const source = k.source ? String(k.source) : null
+  return jsxs('div', {
+    className: 'flex flex-col gap-3',
+    children: [
+      jsxs('div', {
+        className: 'flex flex-wrap items-center gap-2',
+        children: [
+          jsx(StatusDot, { tone: failed ? 'bad' : 'good' }),
+          jsx('span', {
+            className: 'text-[0.75rem] font-medium text-foreground',
+            children: k.label || 'key'
+          }),
+          source
+            ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-quaternary)', children: source })
+            : null,
+          poolNote
+            ? jsx(Badge, { variant: 'warn', size: 'xs', children: poolNote })
+            : null
+        ]
+      }),
+      failed
+        ? jsx('div', {
+            className: 'text-[0.6875rem] text-(--ui-red)',
+            children: k.error || 'no usage data for this key'
+          })
+        : jsx('div', {
+            className: 'grid gap-6 sm:grid-cols-3',
+            children: wins.map((win, index) => jsx(WindowColumn, { key: win.key, win, now, first: index === 0 }))
+          })
+    ]
+  })
+}
+
 function UsagePage() {
   const snap = useValue($snap)
   const error = useValue($error)
@@ -1037,6 +1080,12 @@ function UsagePage() {
   }, [])
 
   const windows = windowList(snap)
+  // A multi-key account gets one entry per credential in the pool from the
+  // gateway, whatever the keys are named; render each key's own windows rather
+  // than only the top-priority key's. One key (the common case) or a payload
+  // with no `keys` at all falls through to the plain single grid below, so the
+  // familiar layout is unchanged for a single-credential install.
+  const keyList = snap && Array.isArray(snap.keys) ? snap.keys : null
   const stale = updatedAt != null && Date.now() - updatedAt > 5 * POLL_MS
 
   // Soonest reset across the windows, and whichever window is furthest ahead of
@@ -1109,17 +1158,22 @@ function UsagePage() {
             ? jsx('div', { className: 'text-[0.75rem] text-(--ui-text-tertiary)', children: summary })
             : null,
 
-          windows.length
+          keyList && keyList.length > 1
             ? jsx('div', {
-                className: 'grid gap-6 sm:grid-cols-3',
-                children: windows.map((win, index) => jsx(WindowColumn, { key: win.key, win, now, first: index === 0 }))
+                className: 'flex flex-col gap-6',
+                children: keyList.map((k, index) => jsx(KeyBlock, { key: (k.label || 'key') + ':' + index, k, now }))
               })
-            : error
-              ? null
-              : jsx('div', {
-                  className: 'text-[0.8125rem] text-(--ui-text-tertiary)',
-                  children: loading ? 'Reading OpenCode Go usage...' : 'No usage data yet. Hit Refresh.'
-                }),
+            : windows.length
+              ? jsx('div', {
+                  className: 'grid gap-6 sm:grid-cols-3',
+                  children: windows.map((win, index) => jsx(WindowColumn, { key: win.key, win, now, first: index === 0 }))
+                })
+              : error
+                ? null
+                : jsx('div', {
+                    className: 'text-[0.8125rem] text-(--ui-text-tertiary)',
+                    children: loading ? 'Reading OpenCode Go usage...' : 'No usage data yet. Hit Refresh.'
+                  }),
 
           jsx(ModelsTable, { models, error: modelsError }),
 

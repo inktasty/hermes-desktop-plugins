@@ -1357,6 +1357,83 @@ async function testOpencodeUsage() {
   check('restored cache reports its real age, not the restore time', /updated 2h ago/.test(freshText), freshText.slice(0, 400))
   check('restored cache never says just now', !/just now/.test(freshText), freshText.slice(0, 400))
   check('the footer stamp comes from fetched_at', /Fetched at/.test(freshText), freshText.slice(0, 400))
+
+  // Multi-key account: the gateway now returns one entry per credential in the
+  // pool, so the page must show BOTH keys' windows and label a benched key.
+  // A payload without `keys` keeps the old single grid (asserted above), so this
+  // covers only the new shape.
+  const base = makeSnapshot(Date.now())
+  const twoKeySnap = {
+    ...base,
+    keys: [
+      {
+        index: 0, label: 'OPENCODE_GO_API_KEY', priority: 0,
+        source: 'env:OPENCODE_GO_API_KEY', pool_status: 'exhausted', ok: true, windows: base.windows
+      },
+      {
+        index: 1, label: 'secondary', priority: 1, source: 'manual', pool_status: null, ok: true,
+        windows: {
+          rolling: { ...base.windows.rolling, used_percent: 6, remaining_percent: 94 },
+          weekly: { ...base.windows.weekly, used_percent: 5, remaining_percent: 95 },
+          monthly: { ...base.windows.monthly, used_percent: 8, remaining_percent: 92, projected_percent: 20, on_pace: true, hits_limit_at: null }
+        }
+      }
+    ]
+  }
+  const twoMod = (await loadPlugin('opencode-usage', { fresh: 5, scriptsDir: '/tmp/hdp-test/scripts' })).mod
+  const { ctx: twoCtx, contributions: twoContributions } = captureCtx()
+  sdk.setRpc(async (method, params) => {
+    if (method === 'shell.exec') {
+      const cmd = String(params && params.command || '')
+      if (cmd.includes('opencode_go_models.py')) return { stdout: packPayload(modelsPayload), stderr: '', code: 0 }
+      if (cmd.includes('opencode_go_usage.py')) return { stdout: JSON.stringify(twoKeySnap), stderr: '', code: 0 }
+    }
+    return {}
+  })
+  stubTimers()
+  twoMod.register(twoCtx)
+  restoreTimers()
+  await settle()
+  const twoPage = twoContributions.find(c => c.area === 'routes')
+  const twoOut = render(twoPage.render)
+  check('multi-key: page renders without error', !twoOut.err, twoOut.err && twoOut.err.message)
+  check('multi-key: both key labels render', twoOut.text.includes('OPENCODE_GO_API_KEY') && twoOut.text.includes('secondary'), twoOut.text.slice(0, 300))
+  check('multi-key: the benched key is labelled', twoOut.text.includes('exhausted'), twoOut.text.slice(0, 300))
+  check('multi-key: first key windows render', twoOut.text.includes('88% left') && twoOut.text.includes('94% left'), twoOut.text.slice(0, 500))
+  check('multi-key: second key windows render (own numbers)', twoOut.text.includes('92% left') && twoOut.text.includes('95% left'), twoOut.text.slice(0, 500))
+  const twoChip = twoContributions.find(c => c.area === 'statusBar.right')
+  const twoChipOut = render(twoChip.render)
+  check('multi-key: chip still reads the primary key', twoChipOut.text.includes('12/47/6%'), twoChipOut.text)
+  const twoHooks = [render(twoPage.render).hooks, render(twoPage.render).hooks]
+  check('multi-key: hook count stable across renders', new Set(twoHooks).size === 1, JSON.stringify(twoHooks))
+
+  // A one-key payload (the common install) must keep the old plain grid with no
+  // key header, so a single-credential gateway looks exactly as it always has.
+  const oneKeySnap = {
+    ...base,
+    keys: [{
+      index: 0, label: 'OPENCODE_GO_API_KEY', priority: 0,
+      source: 'env:OPENCODE_GO_API_KEY', pool_status: null, ok: true, windows: base.windows
+    }]
+  }
+  const oneMod = (await loadPlugin('opencode-usage', { fresh: 6, scriptsDir: '/tmp/hdp-test/scripts' })).mod
+  const { ctx: oneCtx, contributions: oneContributions } = captureCtx()
+  sdk.setRpc(async (method, params) => {
+    if (method === 'shell.exec') {
+      const cmd = String(params && params.command || '')
+      if (cmd.includes('opencode_go_models.py')) return { stdout: packPayload(modelsPayload), stderr: '', code: 0 }
+      if (cmd.includes('opencode_go_usage.py')) return { stdout: JSON.stringify(oneKeySnap), stderr: '', code: 0 }
+    }
+    return {}
+  })
+  stubTimers()
+  oneMod.register(oneCtx)
+  restoreTimers()
+  await settle()
+  const oneOut = render(oneContributions.find(c => c.area === 'routes').render)
+  check('one-key: no per-key header appears', !oneOut.text.includes('OPENCODE_GO_API_KEY'), oneOut.text.slice(0, 300))
+  check('one-key: the plain window grid still renders', oneOut.text.includes('88% left') && oneOut.text.includes('94% left'), oneOut.text.slice(0, 300))
+
   Date.now = realNow
 }
 

@@ -1,15 +1,46 @@
 #!/usr/bin/env python3
 """OpenCode Go usage snapshot for the Hermes desktop 'opencode-usage' plugin.
 
-Reads the Go API key from the environment or $HERMES_HOME/.env and calls the
-official quota endpoint, then prints ONE line of JSON on stdout (the key is
-never printed). Stdlib only: runs under any python3 on the gateway.
+Reports EVERY OpenCode Go key it can find, so an account with more than one
+credential (a credential pool with a second key) shows each key's own quota
+instead of only whichever key happens to be first.
+
+Keys are discovered from two places, in this order:
+
+  1. the gateway's credential pool -- $HERMES_HOME/auth.json ->
+     credential_pool['opencode-go'] (other spellings of that provider name are
+     accepted too). Each row is used as-is: its own `access_token`, else the
+     variable its `source` names (`env:NAME`).
+  2. the gateway's .env -- OPENCODE_GO_API_KEY and numbered siblings
+     (OPENCODE_GO_API_KEY_2, _3, ...). Anything already covered by (1) is
+     skipped, so this only ADDS keys the pool does not know about.
+
+Nothing here assumes how a key is named: labels are taken from the pool row, and
+a pool row whose secret this script cannot read is reported as such rather than
+guessed at. A key value is never printed. ONE line of JSON goes to stdout.
+
+Payload shape:
+
+    {
+      "ok": true,
+      "fetched_at": "...",
+      "source": "https://opencode.ai/zen/go/v1/usage",
+      "plan": "OpenCode Go",
+      "keys": [ {"index","label","priority","source","pool_status","ok",
+                 "error","windows": {...}}, ... ],
+      "windows": {...},   # the first key that returned data (older callers/chips)
+      "error": null
+    }
+
+Stdlib only: runs under any python3 on the gateway.
 
 Usage:
     python3 opencode_go_usage.py
 """
 
+import base64
 import datetime as dt
+import gzip
 import json
 import os
 import sys
@@ -18,6 +49,19 @@ import urllib.request
 
 USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 TIMEOUT = 20
+# shell.exec hands back only the LAST 4000 chars of stdout, so anything larger
+# ships gzipped+base64 as {"ok":true,"gzip":"<b64>"} and is inflated by the
+# plugin (same contract as opencode_go_models.py).
+STDOUT_PLAIN_LIMIT = 3500
+# The provider whose keys this plugin reports. `opencode-go` is the name Hermes
+# uses; the alternates absorb a differently spelled pool entry (the comparison
+# strips '-' and '_'), and non-Go providers are ignored.
+POOL_PROVIDER = "opencode-go"
+POOL_PROVIDER_COMPACT = "opencodego"
+PRIMARY_ENV = "OPENCODE_GO_API_KEY"
+ENV_SIBLING_LIMIT = 9
+# opencode.ai answers 403 to a default python-urllib user agent; identify.
+USER_AGENT = "hermes-desktop-plugin/1.0 (+https://hermes-agent.nousresearch.com)"
 
 # Window label + nominal length. The lengths are what OpenCode documents
 # (5-hour rolling, calendar week, monthly from the subscription date); they are
@@ -53,21 +97,114 @@ def heartbeat(line: str) -> None:
         pass
 
 
-def api_key() -> str:
-    key = (os.environ.get("OPENCODE_GO_API_KEY") or "").strip()
-    if key:
-        return key
-    env_path = os.path.join(hermes_home(), ".env")
+def env_lookup(var: str) -> str:
+    """A variable's value from the process env, else $HERMES_HOME/.env."""
+    if not var:
+        return ""
+    value = (os.environ.get(var) or "").strip()
+    if value:
+        return value
     try:
-        with open(env_path, "r", encoding="utf-8", errors="replace") as fh:
+        with open(os.path.join(hermes_home(), ".env"), "r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
                 line = line.strip()
-                if line.startswith("OPENCODE_GO_API_KEY"):
-                    _, _, value = line.partition("=")
-                    return value.strip().strip('"').strip("'")
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, _, raw = line.partition("=")
+                if name.strip() == var:
+                    return raw.strip().strip('"').strip("'")
     except OSError:
         pass
     return ""
+
+
+def env_key_names() -> list:
+    """Every .env variable a Go key may live under: the canonical name plus the
+    numbered siblings Hermes accepts for extra credentials."""
+    names = [PRIMARY_ENV]
+    for n in range(2, ENV_SIBLING_LIMIT + 1):
+        names.append("%s_%d" % (PRIMARY_ENV, n))
+    return names
+
+
+def load_pool() -> list:
+    """The credential_pool rows for opencode-go ([] when absent/unreadable). The
+    canonical provider name wins; a differently spelled one is accepted so a
+    renamed pool still reports."""
+    try:
+        with open(os.path.join(hermes_home(), "auth.json"), "r", encoding="utf-8", errors="replace") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    pools = data.get("credential_pool") or {}
+    if not isinstance(pools, dict):
+        return []
+    rows = pools.get(POOL_PROVIDER)
+    if not isinstance(rows, list):
+        compact = POOL_PROVIDER_COMPACT
+        for name, candidate in pools.items():
+            if isinstance(candidate, list) and str(name).lower().replace("-", "").replace("_", "") == compact:
+                rows = candidate
+                break
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def resolve_key(entry: dict) -> str:
+    """The secret for one pool row: the row's own token, else the variable its
+    source names. A row we cannot read yields '' -- never the primary key, which
+    would put one key's numbers under another key's name."""
+    for field in ("access_token", "secret"):
+        token = entry.get(field)
+        if isinstance(token, str) and token.strip():
+            return token.strip()
+    source = str(entry.get("source") or "")
+    if source.startswith("env:"):
+        return env_lookup(source[4:])
+    return ""
+
+
+def collect_entries() -> list:
+    """One row per discoverable key, pool rows first (highest priority first),
+    then any extra .env keys the pool does not carry. Identical secrets collapse
+    to a single row. A single-key host ends up with exactly one row, so it
+    behaves as it always has."""
+    rows = []
+    seen = set()
+    for index, entry in enumerate(load_pool()):
+        key = resolve_key(entry)
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        rows.append({
+            "index": index,
+            "label": entry.get("label") or ("key %d" % index),
+            "priority": entry.get("priority"),
+            "source": entry.get("source"),
+            "pool_status": entry.get("last_status"),
+            "key": key,
+        })
+    for name in env_key_names():
+        key = env_lookup(name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        rows.append({
+            "index": len(rows),
+            "label": name,
+            "priority": None,
+            "source": "env:" + name,
+            "pool_status": None,
+            "key": key,
+        })
+    rows.sort(key=lambda r: (
+        r["priority"] is None,
+        r["priority"] if isinstance(r["priority"], (int, float)) else 999,
+        r["index"],
+    ))
+    return rows
 
 
 def parse_iso(value):
@@ -104,7 +241,7 @@ def window_start(resets_at: dt.datetime, key: str):
         return resets_at - dt.timedelta(days=30)
 
 
-def build_window(key: str, label: str, length_s, kind: str, raw: dict, now: dt.datetime) -> dict:
+def build_window(key: str, label: str, length_s, raw: dict, now: dt.datetime) -> dict:
     percent = raw.get("percent")
     try:
         percent = float(percent)
@@ -152,20 +289,24 @@ def build_window(key: str, label: str, length_s, kind: str, raw: dict, now: dt.d
     return row
 
 
-def main() -> int:
-    now = dt.datetime.now(dt.timezone.utc)
-    key = api_key()
-    if not key:
-        heartbeat("%s no-key" % iso(now))
-        print(json.dumps({"ok": False, "error": "no OPENCODE_GO_API_KEY on this host"}))
-        return 0
+def windows_for(payload: dict, now: dt.datetime) -> dict:
+    usage = payload.get("usage") or {}
+    windows = {}
+    for key_name, label, length_s, _kind in WINDOWS:
+        raw = usage.get(key_name)
+        if isinstance(raw, dict):
+            windows[key_name] = build_window(key_name, label, length_s, raw, now)
+    return windows
 
+
+def probe(key: str, now: dt.datetime):
+    """One usage call for one key. Returns (ok, windows, error, http_status)."""
     request = urllib.request.Request(
         USAGE_URL,
         headers={
             "Authorization": "Bearer " + key,
             "Accept": "application/json",
-            "User-Agent": "hermes-desktop-plugin/1.0",
+            "User-Agent": USER_AGENT,
         },
     )
     try:
@@ -173,32 +314,74 @@ def main() -> int:
             payload = json.loads(response.read().decode("utf-8", "replace"))
     except urllib.error.HTTPError as exc:
         hint = {401: "API key rejected", 403: "no Go subscription on this key"}.get(exc.code, "HTTP %s" % exc.code)
-        heartbeat("%s http-%s" % (iso(now), exc.code))
-        print(json.dumps({"ok": False, "error": hint, "status": exc.code}))
-        return 0
+        return False, {}, hint, exc.code
     except Exception as exc:  # network, DNS, timeout, bad JSON
-        heartbeat("%s error %s" % (iso(now), type(exc).__name__))
-        print(json.dumps({"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}))
+        return False, {}, "%s: %s" % (type(exc).__name__, exc), None
+    windows = windows_for(payload, now)
+    if not windows:
+        return False, {}, "usage endpoint returned no windows", None
+    return True, windows, None, None
+
+
+def emit(payload: dict) -> None:
+    """ONE line of JSON. Gzipped+base64 when the plain form would be cut off by
+    shell.exec's 4000-char stdout tail."""
+    text = json.dumps(payload)
+    if len(text) <= STDOUT_PLAIN_LIMIT:
+        print(text)
+        return
+    blob = base64.b64encode(gzip.compress(text.encode("utf-8"), 9, mtime=0)).decode("ascii")
+    print(json.dumps({"ok": payload.get("ok", True), "gzip": blob}))
+
+
+def main() -> int:
+    now = dt.datetime.now(dt.timezone.utc)
+    rows = collect_entries()
+    if not any(r["key"] for r in rows):
+        heartbeat("%s no-key" % iso(now))
+        emit({"ok": False, "error": "no OpenCode Go key found (checked the credential pool and .env)"})
         return 0
 
-    usage = payload.get("usage") or {}
-    windows = {}
-    for key_name, label, length_s, kind in WINDOWS:
-        raw = usage.get(key_name)
-        if isinstance(raw, dict):
-            windows[key_name] = build_window(key_name, label, length_s, kind, raw, now)
+    keys_out = []
+    for row in rows:
+        base = {
+            "index": row["index"],
+            "label": row["label"],
+            "priority": row["priority"],
+            "source": row["source"],
+            "pool_status": row["pool_status"],
+        }
+        if not row["key"]:
+            keys_out.append(dict(base, ok=False, error="no key readable for this pool entry", windows={}))
+            continue
+        ok, windows, error, status = probe(row["key"], now)
+        entry_out = dict(base, ok=ok, windows=windows)
+        if error:
+            entry_out["error"] = error
+            if status is not None:
+                entry_out["status"] = status
+        keys_out.append(entry_out)
 
-    print(json.dumps({
-        "ok": bool(windows),
+    primary = {}
+    for entry in keys_out:
+        if entry.get("windows"):
+            primary = entry["windows"]
+            break
+
+    emit({
+        "ok": bool(primary),
         "fetched_at": iso(now),
         "source": USAGE_URL,
         "plan": "OpenCode Go",
-        "windows": windows,
-        "error": None if windows else "usage endpoint returned no windows",
-    }))
+        "keys": keys_out,
+        "windows": primary,
+        "error": None if primary else "usage endpoint returned no windows",
+    })
     heartbeat("%s ok %s" % (
         iso(now),
-        " ".join("%s=%s" % (k, windows[k]["used_percent"]) for k in ("rolling", "weekly", "monthly") if k in windows) or "no-windows",
+        " ".join("%s=[%s]" % (k["label"], ",".join(
+            "%s:%s" % (w, (k["windows"].get(w) or {}).get("used_percent"))
+            for w in ("rolling", "weekly", "monthly"))) for k in keys_out) or "no-windows",
     ))
     return 0
 
