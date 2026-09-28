@@ -13,7 +13,7 @@
 # that added the guard knew of five others); they are absent from the app's
 # sources exactly like those five, but they are `sm:` media-query variants, which
 # an inline style cannot express. They have never applied, so leaving them
-# changes nothing visually. OPEN QUESTION for Luke, not a fix: either drop the
+# changes nothing visually. OPEN QUESTION, not a fix: either drop the
 # variants or give the cards a separator the app actually compiles.
 sm:border-s
 sm:border-(--ui-stroke-tertiary)
