@@ -46,6 +46,18 @@ const ID = 'opencode-usage'
 const ROUTE = '/opencode-go'
 const POLL_MS = 60000
 const MODELS_TTL_MS = 6 * 3600000
+// Opening the page should not need the Refresh button. A read older than this is
+// refreshed when the page is opened, and re-checked while it stays open; anything
+// newer is left alone. The manual button never consults this.
+const PAGE_STALE_MS = 30 * 60000
+const PAGE_RECHECK_MS = 60000
+
+// The freshness rule, kept pure and exported: the harness's React stub is a no-op,
+// so an effect cannot be exercised there and this is the only place the rule may
+// live if it is to be tested at all.
+export function pageStale(updatedAt, now) {
+  return updatedAt == null || now - updatedAt > PAGE_STALE_MS
+}
 const TICK_MS = 1000
 // `install.sh` sets the SCRIPTS_DIR constant below to this gateway's scripts path.
 const SCRIPT_NAME = 'opencode_go_usage.py'
@@ -1291,9 +1303,18 @@ function UsagePage() {
   const modelsAt = useValue($modelsAt)
   const settings = useValue($settings)
 
+  // The app keeps this route mounted while you are elsewhere in it, so a check on
+  // mount alone is not "every time the page is opened": re-check on a slow tick as
+  // well. Both paths read the atoms rather than the captured values, and neither
+  // touches the network while the data is still fresh.
   useEffect(() => {
-    if (updatedAt == null || Date.now() - updatedAt > POLL_MS) void refresh()
-    if (modelsAt == null || Date.now() - modelsAt > MODELS_TTL_MS) void refreshModels()
+    const check = () => {
+      if (pageStale($updatedAt.get(), Date.now())) void refresh()
+      if ($modelsAt.get() == null || Date.now() - $modelsAt.get() > MODELS_TTL_MS) void refreshModels()
+    }
+    check()
+    const timer = setInterval(check, PAGE_RECHECK_MS)
+    return () => clearInterval(timer)
   }, [])
 
   const windows = windowList(snap)

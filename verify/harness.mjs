@@ -1029,6 +1029,23 @@ async function testOpencodeUsage() {
     segs.map(s => (s.props.options || []).map(o => o.label).join('/')).join(' | ') === 'Default/Cheapest/Priciest | Default/Newest/Oldest',
     JSON.stringify(segs.map(s => s.props.options)))
   check('both sort controls start on the payload order', segs.every(s => s.props.value === 'default'), JSON.stringify(segs.map(s => s.props.value)))
+
+  // Page freshness: opening the page refetches only when the last good read is
+  // older than the window, and the manual button ignores the window entirely. The
+  // rule is a pure exported function because the React stub cannot run effects.
+  check('page freshness: no read yet always needs one', ns.pageStale(null, 1e12) === true)
+  check('page freshness: a 5-minute-old read is left alone', ns.pageStale(1e12 - 5 * 60000, 1e12) === false)
+  check('page freshness: a 31-minute-old read is refetched', ns.pageStale(1e12 - 31 * 60000, 1e12) === true)
+  check('page freshness: the window is exactly 30 minutes',
+    ns.pageStale(1e12 - 30 * 60000 - 1, 1e12) === true && ns.pageStale(1e12 - 30 * 60000 + 1, 1e12) === false,
+    'at 30m-1ms and 30m+1ms')
+  const refreshBtn = primOf(pageOut, 'Button').find(b => b.props.children === 'Refresh')
+  const requestsBefore = sdk.requests.length
+  if (refreshBtn) refreshBtn.props.onClick()
+  await settle()
+  check('the manual Refresh button refetches inside the freshness window',
+    Boolean(refreshBtn) && sdk.requests.slice(requestsBefore).some(x => String((x.params || {}).command || '').includes('opencode_go_usage.py')),
+    'new requests: ' + (sdk.requests.length - requestsBefore))
   const zdrSwitch = primOf(pageOut, 'Switch')[0]
   const searchBox = primOf(pageOut, 'SearchField')[0]
   check('the bar carries one ZDR-only switch and one name search box', Boolean(zdrSwitch) && Boolean(searchBox))
