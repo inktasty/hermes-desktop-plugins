@@ -4,3 +4,8 @@ verify/*.plugin.*.js
 verify/*.gen.js
 node_modules/.cache/
 *.zip
+# local dated backups, worktrees and byte-code are never part of a release
+*.bak-*
+.worktrees/
+__pycache__/
+*.pyc

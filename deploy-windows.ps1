@@ -1,7 +1,8 @@
 # Deploy the three desktop plugins into the app's plugin folder on THIS machine.
 #
-#   powershell -ExecutionPolicy Bypass -File .\deploy-windows.ps1
-#   ...\deploy-windows.ps1 -ScriptsDir /opt/hermes/scripts
+#   ...\deploy-windows.ps1 -ScriptsDir /opt/hermes/scripts   # the GATEWAY's folder
+#   (or set HERMES_HOME in this shell and omit -ScriptsDir; it cannot be guessed,
+#    because it belongs to the gateway, not to this machine)
 #   ...\deploy-windows.ps1 -AppDir C:\tmp\plugins -Only session-usage
 #
 # Use this when the gateway is REMOTE from the app (e.g. the app on Windows, the
@@ -10,12 +11,27 @@
 # wrong path for that setup. install.sh stays the right tool for a local gateway.
 [CmdletBinding()]
 param(
-    [string]$ScriptsDir = '/home/ubuntu/.hermes/scripts',
+    [string]$ScriptsDir,
     [string]$AppDir = "$env:LOCALAPPDATA\hermes\desktop-plugins",
     [string]$Only
 )
 
 $ErrorActionPreference = 'Stop'
+
+# -ScriptsDir is the GATEWAY's scripts folder, so it cannot be guessed from here: a
+# wrong value bakes into every plugin and only shows up much later, as a confusing
+# "no working python on the gateway shell" error in a chip. Derive it from
+# HERMES_HOME when that happens to be set in this shell, otherwise refuse.
+if (-not $ScriptsDir) {
+    if ($env:HERMES_HOME) {
+        $ScriptsDir = (Join-Path $env:HERMES_HOME 'scripts').Replace('\', '/')
+        Write-Host "no -ScriptsDir given; using HERMES_HOME: $ScriptsDir"
+    } else {
+        Write-Host 'error: no -ScriptsDir given, and HERMES_HOME is not set in this shell.'
+        Write-Host '       pass the GATEWAY scripts dir, e.g. -ScriptsDir /opt/hermes/scripts'
+        exit 1
+    }
+}
 
 # Plugin sources are read from this script's own repo clone, never from AppDir.
 $repoRoot = $PSScriptRoot
@@ -82,6 +98,8 @@ foreach ($id in $pluginIds) {
 
 Write-Host ''
 Write-Host "plugins deployed to $AppDir"
+Write-Host "scripts path baked into the plugins: $ScriptsDir"
+Write-Host "confirm <that path>/opencode_go_usage.py exists ON THE GATEWAY -- it cannot be checked from here."
 Write-Host 'The app hot-reloads an edited plugin within seconds; a NEW plugin folder needs "Reload desktop plugins" from the command palette (Ctrl+K / Cmd+K).'
 
 if ($failed) { exit 1 }

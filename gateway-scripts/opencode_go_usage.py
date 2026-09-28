@@ -44,6 +44,7 @@ Usage:
 import base64
 import datetime as dt
 import gzip
+import io
 import json
 import os
 import sys
@@ -56,6 +57,9 @@ TIMEOUT = 20
 # ships gzipped+base64 as {"ok":true,"gzip":"<b64>"} and is inflated by the
 # plugin (same contract as opencode_go_models.py).
 STDOUT_PLAIN_LIMIT = 3500
+# Absolute ceiling for one stdout line; shell.exec keeps only the last 4000
+# characters, so anything past this is silently cut in half. Fail instead.
+STDOUT_HARD_LIMIT = 3900
 # The provider whose keys this plugin reports. `opencode-go` is the name Hermes
 # uses; the alternates absorb a differently spelled pool entry (the comparison
 # strips '-' and '_'), and non-Go providers are ignored.
@@ -88,6 +92,13 @@ def hermes_home() -> str:
     return os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
 
 
+def safe_label(value) -> str:
+    """A credential label is user-authored and may itself be sensitive, so the
+    heartbeat log keeps only a short, obvious prefix."""
+    text = str(value if value is not None else "?")
+    return text if len(text) <= 12 else text[:11] + "..."
+
+
 def heartbeat(line: str) -> None:
     """Append one line per call so 'is the desktop plugin actually polling?' is
     answerable from the gateway. Best-effort: never break the snapshot."""
@@ -102,7 +113,10 @@ def heartbeat(line: str) -> None:
                     fh.writelines(keep)
         except OSError:
             pass
-        with open(path, "a", encoding="utf-8") as fh:
+        # 0600: the line carries credential labels, so do not leave it world
+        # readable under a default umask.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
     except OSError:
         pass
@@ -116,14 +130,22 @@ def env_lookup(var: str) -> str:
     if value:
         return value
     try:
-        with open(os.path.join(hermes_home(), ".env"), "r", encoding="utf-8", errors="replace") as fh:
+        # utf-8-sig: a BOM (Notepad, PowerShell Out-File) would otherwise hide the
+        # FIRST variable, because str.strip() does not remove U+FEFF.
+        with open(os.path.join(hermes_home(), ".env"), "r", encoding="utf-8-sig", errors="replace") as fh:
             for line in fh:
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
                 name, _, raw = line.partition("=")
-                if name.strip() == var:
-                    return raw.strip().strip('"').strip("'")
+                name = name.strip()
+                if name.startswith("export "):   # `export KEY=value` is a valid line
+                    name = name[7:].strip()
+                if name == var:
+                    value = raw.strip().strip('"').strip("'")
+                    if not raw.strip().startswith(('"', "'")):
+                        value = value.split(" #", 1)[0].strip()   # KEY=abc # note
+                    return value
     except OSError:
         pass
     return ""
@@ -133,8 +155,23 @@ def env_key_names() -> list:
     """Every .env variable a Go key may live under: the canonical name plus the
     numbered siblings Hermes accepts for extra credentials."""
     names = [PRIMARY_ENV]
+    found = set()
+    try:
+        with open(os.path.join(hermes_home(), ".env"), "r", encoding="utf-8-sig", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("export "):
+                    line = line[7:].strip()
+                if "=" not in line:
+                    continue
+                name = line.partition("=")[0].strip()
+                if name.startswith(PRIMARY_ENV + "_") and name[len(PRIMARY_ENV) + 1:].isdigit():
+                    found.add(name)
+    except OSError:
+        pass
     for n in range(2, ENV_SIBLING_LIMIT + 1):
-        names.append("%s_%d" % (PRIMARY_ENV, n))
+        found.add("%s_%d" % (PRIMARY_ENV, n))
+    names.extend(sorted(found, key=lambda s: int(s.rsplit("_", 1)[1])))
     return names
 
 
@@ -143,7 +180,7 @@ def load_pool() -> list:
     canonical provider name wins; a differently spelled one is accepted so a
     renamed pool still reports."""
     try:
-        with open(os.path.join(hermes_home(), "auth.json"), "r", encoding="utf-8", errors="replace") as fh:
+        with open(os.path.join(hermes_home(), "auth.json"), "r", encoding="utf-8-sig", errors="replace") as fh:
             data = json.load(fh)
     except (OSError, ValueError):
         return []
@@ -246,11 +283,19 @@ def parse_moment(value):
     string. None when neither parses."""
     if value is None or isinstance(value, bool):
         return None
+    if isinstance(value, str) and value.strip().replace(".", "", 1).isdigit():
+        value = float(value.strip())
     if isinstance(value, (int, float)):
-        try:
-            return dt.datetime.fromtimestamp(float(value), dt.timezone.utc)
-        except (OverflowError, OSError, ValueError):
-            return None
+        stamp = float(value)
+        # Milliseconds and microseconds are common. Returning None here reads as
+        # "permanently benched" downstream, so try the sane divisors before
+        # giving up rather than rejecting a valid instant.
+        for divisor in (1.0, 1000.0, 1000000.0):
+            try:
+                return dt.datetime.fromtimestamp(stamp / divisor, dt.timezone.utc)
+            except (OverflowError, OSError, ValueError):
+                continue
+        return None
     return parse_iso(value)
 
 
@@ -376,8 +421,16 @@ def emit(payload: dict) -> None:
     if len(text) <= STDOUT_PLAIN_LIMIT:
         print(text)
         return
-    blob = base64.b64encode(gzip.compress(text.encode("utf-8"), 9, mtime=0)).decode("ascii")
-    print(json.dumps({"ok": payload.get("ok", True), "gzip": blob}))
+    # GzipFile, not gzip.compress(mtime=...): the mtime keyword needs Python 3.8
+    # and this script claims "any python3". Bytes are identical (mtime pinned 0).
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=9, mtime=0) as fh:
+        fh.write(text.encode("utf-8"))
+    line = json.dumps({"ok": payload.get("ok", True), "gzip": base64.b64encode(buf.getvalue()).decode("ascii")})
+    if len(line) > STDOUT_HARD_LIMIT:
+        print(json.dumps({"ok": False, "error": "payload too large to ship"}))
+        return
+    print(line)
 
 
 def main() -> int:
@@ -453,8 +506,8 @@ def main() -> int:
     active_label = keys_out[active_at]["label"] if 0 <= active_at < len(keys_out) else "?"
     heartbeat("%s ok active=%s %s" % (
         iso(now),
-        active_label,
-        " ".join("%s=[%s]" % (k["label"], ",".join(
+        safe_label(active_label),
+        " ".join("%s=[%s]" % (safe_label(k["label"]), ",".join(
             "%s:%s" % (w, (k["windows"].get(w) or {}).get("used_percent"))
             for w in ("rolling", "weekly", "monthly"))) for k in keys_out) or "no-windows",
     ))
@@ -462,4 +515,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as exc:   # a traceback leaves the plugin with no JSON at all
+        print(json.dumps({"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}))
+        sys.exit(0)

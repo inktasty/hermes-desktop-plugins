@@ -68,13 +68,17 @@ When the app's gateway is remote from the app (the app on Windows, the gateway
 elsewhere), run this from a clone of the repo **on the app machine**:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\deploy-windows.ps1
+powershell -ExecutionPolicy Bypass -File .\deploy-windows.ps1 -ScriptsDir /opt/hermes/scripts
 ```
 
-It replaces `__HERMES_SCRIPTS__` with the **gateway's** scripts path
-(`/home/ubuntu/.hermes/scripts` by default, never a Windows path), so pass
-`-ScriptsDir` when that gateway home differs. Files already identical are left
-alone and printed as `unchanged`.
+It replaces `__HERMES_SCRIPTS__` with the **gateway's** scripts path. That path
+lives on the gateway, not on this machine, so the script will not invent one:
+pass `-ScriptsDir`, or set `HERMES_HOME` in the same shell (when that really is
+the gateway home) and it is derived from that. A wrong value does not fail at
+deploy time -- it surfaces later as a "no working python on the gateway shell"
+chip error -- so the run prints the path it baked in; confirm
+`<that path>/opencode_go_usage.py` exists on the gateway. Files already
+identical are left alone and printed as `unchanged`.
 
 ### No manual path edits needed
 

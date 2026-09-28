@@ -18,7 +18,9 @@ Stdlib only. Usage:  python3 opencode_go_models.py
 """
 
 import base64
+import datetime as dt
 import gzip
+import io
 import json
 import os
 import re
@@ -43,6 +45,8 @@ HTTP_TIMEOUT = 25
 USER_AGENT = "hermes-desktop-plugin/1.0 (+https://hermes-agent.nousresearch.com)"
 # shell.exec returns only the last 4000 chars of stdout; stay well under it.
 STDOUT_PLAIN_LIMIT = 3500
+# Absolute ceiling for one stdout line; past this the gateway truncates it.
+STDOUT_HARD_LIMIT = 3900
 
 # Caps and offers OpenCode announces on X but has not put in the docs yet. Keep
 # these short and always carry the source URL, so the table can say where a
@@ -77,16 +81,70 @@ def env_value(name):
     if value:
         return value.strip()
     try:
-        for line in ENV_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
+        # utf-8-sig: a BOM (Notepad, PowerShell Out-File) would otherwise hide the
+        # FIRST variable, because str.strip() does not remove U+FEFF.
+        for line in ENV_FILE.read_text(encoding="utf-8-sig", errors="replace").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
             key, raw = line.split("=", 1)
-            if key.strip() == name:
-                return raw.strip().strip("'\"")
+            key = key.strip()
+            if key.startswith("export "):   # `export KEY=value` is a valid line
+                key = key[7:].strip()
+            if key == name:
+                value = raw.strip().strip("'\"")
+                if not raw.strip().startswith(("'", '"')):
+                    value = value.split(" #", 1)[0].strip()   # KEY=abc # note
+                return value
     except OSError:
         return ""
     return ""
+
+
+def gateway_key():
+    """The Go key to authenticate with: the highest-priority credential-pool row
+    the gateway has not benched, else the plain .env variable.
+
+    The pool is the setup the README documents, and the usage script reads it --
+    reading only OPENCODE_GO_API_KEY here made a pool-only install fall back to
+    the whole live catalog while the page still claimed docs prices.
+    """
+    try:
+        data = json.loads((HERMES_HOME / "auth.json").read_text(encoding="utf-8-sig", errors="replace"))
+    except (OSError, ValueError):
+        data = {}
+    pools = (data or {}).get("credential_pool") or {}
+    rows = []
+    if isinstance(pools, dict):
+        candidate = pools.get("opencode-go")
+        if not isinstance(candidate, list):
+            for name, value in pools.items():
+                if isinstance(value, list) and str(name).lower().replace("-", "").replace("_", "") == "opencodego":
+                    candidate = value
+                    break
+        if isinstance(candidate, list):
+            rows = [row for row in candidate if isinstance(row, dict)]
+
+    benched = {"exhausted", "invalid", "disabled", "revoked", "failed", "error"}
+    ranked = []
+    for index, row in enumerate(rows):
+        token = ""
+        for field in ("access_token", "secret"):
+            candidate = row.get(field)
+            if isinstance(candidate, str) and candidate.strip():
+                token = candidate.strip()
+                break
+        if not token:
+            source = str(row.get("source") or "")
+            if source.startswith("env:"):
+                token = env_value(source[4:])
+        if not token:
+            continue   # unreadable row: never borrow another key's identity
+        rank = 1 if str(row.get("last_status") or "").strip().lower() in benched else 0
+        priority = row.get("priority")
+        ranked.append((rank, priority if isinstance(priority, (int, float)) else index, index, token))
+    ranked.sort()
+    return ranked[0][3] if ranked else env_value("OPENCODE_GO_API_KEY")
 
 
 def http_get(url, headers=None, timeout=HTTP_TIMEOUT):
@@ -133,7 +191,7 @@ def registry_index():
     entries that publish a release_date are indexed.
     """
     try:
-        cache = json.loads(REGISTRY_CACHE.read_text(encoding="utf-8", errors="replace"))
+        cache = json.loads(REGISTRY_CACHE.read_text(encoding="utf-8-sig", errors="replace"))
     except (OSError, ValueError):
         return {}
     if not isinstance(cache, dict):
@@ -215,9 +273,9 @@ def promo_label(raw):
 def api_models():
     """[{id}] the key is served, plus the base URL it came from."""
     base = (env_value("OPENCODE_GO_BASE_URL") or DEFAULT_GO_BASE).rstrip("/")
-    key = env_value("OPENCODE_GO_API_KEY")
+    key = gateway_key()
     if not key:
-        return None, base, "no OPENCODE_GO_API_KEY in the gateway .env"
+        return None, base, "no OpenCode Go key found (checked the credential pool and .env)"
     try:
         raw, _ = http_get(base + "/models", {"Authorization": "Bearer " + key})
         payload = json.loads(text_of(raw))
@@ -236,12 +294,17 @@ def fetch_catalog():
     """{model_id: {input, output, cache_read, cache_write, context, name}} + age."""
     cached = None
     try:
-        cached = json.loads(CATALOG_CACHE.read_text(encoding="utf-8", errors="replace"))
+        cached = json.loads(CATALOG_CACHE.read_text(encoding="utf-8-sig", errors="replace"))
     except (OSError, ValueError):
         cached = None
     age = None
     if isinstance(cached, dict) and isinstance(cached.get("models"), dict):
-        age = time.time() - float(cached.get("fetched_at", 0) or 0)
+        # A truncated or hand-edited cache can hold a non-numeric fetched_at, and
+        # the float() below is outside the read guard: treat it as stale.
+        try:
+            age = time.time() - float(cached.get("fetched_at", 0) or 0)
+        except (TypeError, ValueError):
+            age = None
 
     if isinstance(cached, dict) and age is not None and age < CATALOG_TTL_S:
         return cached["models"], age, None
@@ -291,7 +354,7 @@ def fetch_catalog():
 def registry_fallback():
     """models.dev registry cache, the same file model_price_lookup.py reads."""
     try:
-        cache = json.loads(REGISTRY_CACHE.read_text(encoding="utf-8", errors="replace"))
+        cache = json.loads(REGISTRY_CACHE.read_text(encoding="utf-8-sig", errors="replace"))
     except (OSError, ValueError):
         return {}
     models = ((cache.get("opencode-go") or {}).get("models")) or {}
@@ -615,8 +678,16 @@ def emit(payload):
     line = json.dumps(payload, separators=(",", ":"))
     if len(line) <= STDOUT_PLAIN_LIMIT:
         return line
-    packed = base64.b64encode(gzip.compress(line.encode("utf-8"), 9, mtime=0)).decode("ascii")
-    return json.dumps({"ok": payload.get("ok"), "gzip": packed}, separators=(",", ":"))
+    # GzipFile, not gzip.compress(mtime=...): the mtime keyword needs Python 3.8
+    # and this script is documented as stdlib-only on any python3.
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=9, mtime=0) as fh:
+        fh.write(line.encode("utf-8"))
+    packed = base64.b64encode(buf.getvalue()).decode("ascii")
+    out = json.dumps({"ok": payload.get("ok"), "gzip": packed}, separators=(",", ":"))
+    if len(out) > STDOUT_HARD_LIMIT:
+        return json.dumps({"ok": False, "error": "payload too large to ship"}, separators=(",", ":"))
+    return out
 
 
 def main():
@@ -669,7 +740,7 @@ def main():
     payload = {
         "ok": ok,
         "error": None if ok else (errors[0] if errors else "no model data"),
-        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "fetched_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "docs_url": DOCS_URL,
         "api_base": base,
         "plan": plan_info(markdown) if markdown else {},
@@ -711,4 +782,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:   # a traceback leaves the plugin with no JSON at all
+        print(json.dumps({"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}))

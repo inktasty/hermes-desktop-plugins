@@ -346,9 +346,12 @@ function fmtCap(d) {
   return Number.isInteger(d) ? '$' + String(d) : '$' + d.toFixed(2)
 }
 
+// Grouped in a fixed locale: the app locale may group with '.' (de) or a space
+// (fr) while the money and percent columns beside it are always '$1.23' and
+// '12.5%'. Three conventions in one table reads worse than one borrowed one.
 function fmtInt(n) {
   if (!Number.isFinite(n)) return null
-  return Math.round(n).toLocaleString()
+  return Math.round(n).toLocaleString('en-US')
 }
 
 function fmtAge(ms) {
@@ -1512,7 +1515,12 @@ export default {
       const scriptPath = SCRIPTS_DIR + '/' + scriptName
       for (const py of candidates) {
         try {
-          const resp = await host.request('shell.exec', { command: py + ' ' + scriptPath })
+          // Double-quoted: a scripts dir containing a space (C:/Users/John Smith/...,
+          // ~/Library/Application Support/...) otherwise splits into two argv
+          // tokens, and the failure reads as a missing python instead of a bad
+          // path. Quirk: under POSIX sh a literal $ or backtick in the path would
+          // still expand -- rare in a scripts dir, and narrower than no quoting.
+          const resp = await host.request('shell.exec', { command: py + ' "' + scriptPath + '"' })
           const stdout = resp && resp.stdout ? String(resp.stdout) : ''
           if (stdout) sawOutput = true
           const code = resp && typeof resp.code === 'number' ? resp.code : 0

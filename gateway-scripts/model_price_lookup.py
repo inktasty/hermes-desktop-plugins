@@ -40,7 +40,7 @@ def config_model_provider() -> tuple:
     """Last-resort regex read of config.yaml's model block (stdlib only)."""
     model = provider = ""
     try:
-        text = CONFIG.read_text(encoding="utf-8", errors="replace")
+        text = CONFIG.read_text(encoding="utf-8-sig", errors="replace")
     except OSError:
         return model, provider
     # The block may be the first thing in the file, so anchor on a line boundary.
@@ -165,7 +165,7 @@ def main() -> None:
     if not CACHE.exists():
         fail(f"registry cache missing at {CACHE}")
     try:
-        cache = json.loads(CACHE.read_text(encoding="utf-8", errors="replace"))
+        cache = json.loads(CACHE.read_text(encoding="utf-8-sig", errors="replace"))
     except (OSError, ValueError) as exc:
         fail(f"cannot read registry cache: {exc}")
 
@@ -188,4 +188,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:   # a traceback leaves the plugin with no JSON at all
+        print(json.dumps({"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}))

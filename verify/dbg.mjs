@@ -1,8 +1,12 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import * as sdk from '@hermes/plugin-sdk'
-const HERE = '/home/ubuntu/.hermes/share/hermes-desktop-plugins/verify'
-fs.copyFileSync('/home/ubuntu/.hermes/desktop-plugins/opencode-usage/plugin.js', path.join(HERE, 'dbg.plugin.js'))
+import { fileURLToPath } from 'node:url'
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+// Debug whichever copy you like; HDP_PLUGIN overrides it so this file
+// carries no machine-specific absolute path into the public repo.
+const PLUGIN = process.env.HDP_PLUGIN || path.join(HERE, '..', 'desktop-plugins', 'opencode-usage', 'plugin.js')
+fs.copyFileSync(PLUGIN, path.join(HERE, 'dbg.plugin.js'))
 sdk.setRpc(async (m, p) => { console.error('RPC', m, JSON.stringify(p).slice(0,120)); return { stdout: '{"ok":true}', stderr: '', code: 0 } })
 const real = globalThis.setInterval
 globalThis.setInterval = (fn, ms) => { console.error('setInterval', ms); return 0 }

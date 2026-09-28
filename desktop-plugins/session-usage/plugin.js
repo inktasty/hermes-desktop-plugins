@@ -406,7 +406,10 @@ export default {
       const scriptPath = SCRIPTS_DIR + '/' + SCRIPT_NAME
       for (const py of candidates) {
         try {
-          const resp = await host.request('shell.exec', { command: py + ' ' + scriptPath + (args ? ' ' + args : '') })
+          // Double-quoted for the same reason as opencode-usage: a scripts path
+          // with a space otherwise splits into two argv tokens. (POSIX sh still
+          // expands $ or a backtick inside it -- rare in a scripts dir.)
+          const resp = await host.request('shell.exec', { command: py + ' "' + scriptPath + '"' + (args ? ' ' + args : '') })
           const stdout = resp && resp.stdout ? String(resp.stdout) : ''
           const code = resp && typeof resp.code === 'number' ? resp.code : 0
           lastCode = code
