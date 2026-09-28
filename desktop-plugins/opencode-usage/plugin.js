@@ -49,6 +49,12 @@ const MODELS_TTL_MS = 6 * 3600000
 // Opening the page should not need the Refresh button. A read older than this is
 // refreshed when the page is opened, and re-checked while it stays open; anything
 // newer is left alone. The manual button never consults this.
+//
+// Belt and braces, deliberately: while the app is up, armRefreshTimer's poll already
+// refetches every refreshSec, so in practice this rule fires only when that poll is
+// NOT running (a plugin reloaded without a full restart, timers the app suspended
+// while idle) or the gateway call has been failing. Read it as the backstop for those
+// cases, not as "the page only refreshes when you open it".
 const PAGE_STALE_MS = 30 * 60000
 const PAGE_RECHECK_MS = 60000
 
@@ -1137,7 +1143,7 @@ export function ModelsTable({ models, error, initialControls }) {
 // One credential's own block: its name (and where it comes from) plus its own
 // three quota windows. The gateway returns one of these per key in the pool, so
 // a two-key account shows both limits instead of only the highest-priority one.
-function KeyBlock({ k, now, settings }) {
+function KeyBlock({ k, now, settings, position }) {
   const wins = windowList({ windows: k.windows })
   const failed = k.ok === false || wins.length === 0
   // The pool benched this key after a failure (e.g. 'exhausted'): the badge says
@@ -1159,7 +1165,7 @@ function KeyBlock({ k, now, settings }) {
           jsx(StatusDot, { tone: failed ? 'bad' : k.benched ? 'warn' : 'good' }),
           jsx('span', {
             className: 'text-[0.75rem] font-medium text-foreground',
-            children: displayName(k)
+            children: displayName(k, position)
           }),
           k.active && !k.benched
             ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: 'in use' })
@@ -1399,7 +1405,7 @@ function UsagePage() {
           keyList && keyList.length > 1
             ? jsx('div', {
                 className: 'flex flex-col gap-6',
-                children: keyList.map((k, index) => jsx(KeyBlock, { key: 'k' + (k.ordinal || index), k, now, settings }))
+                children: keyList.map((k, index) => jsx(KeyBlock, { key: 'k' + (k.ordinal || index), k, now, settings, position: index + 1 }))
               })
             : windows.length
               ? jsx('div', {
@@ -1473,7 +1479,7 @@ function UsageChip() {
             ? windows.map(w => (w.used_percent == null ? '--' : Math.round(w.used_percent))).join('/') + '%'
             : 'no data')]
         : []
-      ).concat(keys.map(k => {
+      ).concat(keys.map((k, i) => {
         const ks = windowList({ windows: k.windows })
         const pcts = ks.length
           ? ks.map(w => (w.used_percent == null ? '--' : Math.round(w.used_percent))).join('/') + '%'
@@ -1481,7 +1487,7 @@ function UsageChip() {
         const shown = picked.marker && picked.marker !== 'all' && String(picked.marker).split('/')[0] === String(k.ordinal)
         const standing = k.active ? 'in use' : k.benched ? 'benched' : 'standby'
         const raw = settings.showRawNames && k.label ? ' [' + k.label + ']' : ''
-        return (shown ? '▶ ' : '') + displayName(k) + ' · ' + standing + raw + ' ' + pcts
+        return (shown ? '▶ ' : '') + displayName(k, i + 1) + ' · ' + standing + raw + ' ' + pcts
       })).join('   |   ') + '   (click for the full page)'
     : windows.length
       ? windows.map(w => {
@@ -1536,12 +1542,14 @@ export default {
       const scriptPath = SCRIPTS_DIR + '/' + scriptName
       for (const py of candidates) {
         try {
-          // Double-quoted: a scripts dir containing a space (C:/Users/John Smith/...,
-          // ~/Library/Application Support/...) otherwise splits into two argv
-          // tokens, and the failure reads as a missing python instead of a bad
-          // path. Quirk: under POSIX sh a literal $ or backtick in the path would
-          // still expand -- rare in a scripts dir, and narrower than no quoting.
-          const resp = await host.request('shell.exec', { command: py + ' "' + scriptPath + '"' })
+          // Single-quoted for the shell. A scripts dir containing a space
+          // (C:/Users/John Smith/..., ~/Library/Application Support/...) otherwise
+          // splits into two argv tokens and the failure reads as a missing python
+          // instead of a bad path. Single quotes also stop a literal $ or backtick
+          // expanding, which double quotes do not; an embedded single quote is
+          // closed, escaped and reopened, so no path can break out of the quoting.
+          const quotedPath = "'" + String(scriptPath).replace(/'/g, "'\\''") + "'"
+          const resp = await host.request('shell.exec', { command: py + ' ' + quotedPath })
           const stdout = resp && resp.stdout ? String(resp.stdout) : ''
           if (stdout) sawOutput = true
           const code = resp && typeof resp.code === 'number' ? resp.code : 0

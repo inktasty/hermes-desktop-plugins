@@ -12,11 +12,23 @@
 [CmdletBinding()]
 param(
     [string]$ScriptsDir,
-    [string]$AppDir = "$env:LOCALAPPDATA\hermes\desktop-plugins",
+    [string]$AppDir,
     [string]$Only
 )
 
 $ErrorActionPreference = 'Stop'
+
+# The app's plugin folder. Derived rather than defaulted: with LOCALAPPDATA unset the
+# old default quietly became "\hermes\desktop-plugins", i.e. a path at the root.
+if (-not $AppDir) {
+    if ($env:LOCALAPPDATA) {
+        $AppDir = Join-Path $env:LOCALAPPDATA 'hermes\desktop-plugins'
+    } else {
+        Write-Host 'error: no -AppDir given, and LOCALAPPDATA is not set in this shell.'
+        Write-Host '       pass the app plugin folder, e.g. -AppDir C:\Users\you\AppData\Local\hermes\desktop-plugins'
+        exit 1
+    }
+}
 
 # -ScriptsDir is the GATEWAY's scripts folder, so it cannot be guessed from here: a
 # wrong value bakes into every plugin and only shows up much later, as a confusing
@@ -35,6 +47,13 @@ if (-not $ScriptsDir) {
 
 # Plugin sources are read from this script's own repo clone, never from AppDir.
 $repoRoot = $PSScriptRoot
+
+# $PSScriptRoot is populated only when the script runs from a file. Dot-sourcing or
+# iex leaves it empty, and every source path below would then resolve against nothing.
+if (-not $repoRoot) {
+    Write-Host 'error: $PSScriptRoot is empty; run this with -File, not dot-sourced or via iex.'
+    exit 1
+}
 $pluginIds = @('deepseek-rate', 'opencode-usage', 'session-usage')
 
 # The shipped placeholder; every occurrence is replaced with the scripts path.

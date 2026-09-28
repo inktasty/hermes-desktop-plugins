@@ -1439,6 +1439,45 @@ async function testOpencodeUsage() {
   const twoHooks = [render(twoPage.render).hooks, render(twoPage.render).hooks]
   check('multi-key: hook count stable across renders', new Set(twoHooks).size === 1, JSON.stringify(twoHooks))
 
+  // A key row can arrive WITHOUT `ordinal` (a different or older gateway). The
+  // position fallback in displayName only works if the caller feeds it, so without
+  // this the second block would also read "Key 1".
+  const noOrdSnap = {
+    ...base,
+    keys: [
+      {
+        index: 0, label: 'A', priority: 0, source: 'manual', pool_status: null, ok: true,
+        active: false, benched: true, benched_until: '2026-10-13T08:40:23Z', windows: base.windows
+      },
+      {
+        index: 1, label: 'B', priority: 1, source: 'manual', pool_status: null, ok: true,
+        active: true, benched: false, benched_until: null,
+        windows: {
+          rolling: { ...base.windows.rolling, used_percent: 6, remaining_percent: 94 },
+          weekly: { ...base.windows.weekly, used_percent: 5, remaining_percent: 95 },
+          monthly: { ...base.windows.monthly, used_percent: 8, remaining_percent: 92, projected_percent: 20, on_pace: true, hits_limit_at: null }
+        }
+      }
+    ]
+  }
+  const noOrdMod = (await loadPlugin('opencode-usage', { fresh: 55, scriptsDir: '/tmp/hdp-test/scripts' })).mod
+  const { ctx: noOrdCtx, contributions: noOrdContributions } = captureCtx()
+  sdk.setRpc(async (method, params) => {
+    if (method === 'shell.exec') {
+      const cmd = String(params && params.command || '')
+      if (cmd.includes('opencode_go_models.py')) return { stdout: packPayload(modelsPayload), stderr: '', code: 0 }
+      if (cmd.includes('opencode_go_usage.py')) return { stdout: JSON.stringify(noOrdSnap), stderr: '', code: 0 }
+    }
+    return {}
+  })
+  stubTimers()
+  noOrdMod.register(noOrdCtx)
+  restoreTimers()
+  await settle()
+  const noOrdOut = render(noOrdContributions.find(c => c.area === 'routes').render)
+  check('multi-key without ordinals: blocks are still numbered by position',
+        noOrdOut.text.includes('Key 1') && noOrdOut.text.includes('Key 2'), noOrdOut.text.slice(0, 400))
+
   // A one-key payload (the common install) must keep the old plain grid with no
   // key header, so a single-credential gateway looks exactly as it always has.
   const oneKeySnap = {

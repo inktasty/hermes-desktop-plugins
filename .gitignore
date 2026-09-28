@@ -2,7 +2,22 @@ verify/*.plugin.js
 verify/*.plugin.*.js
 # scratch copies the probes generate and import (e.g. verify/opencode-usage.e2e.gen.js)
 verify/*.gen.js
-node_modules/.cache/
+# Only the two offline stubs under verify/node_modules ship; a real npm install
+# anywhere (notably verify/) must never be swept into a commit.
+#
+# `node_modules/` with no slash matches at ANY depth, so nested trees are covered.
+# Each stub's parent must then be re-included before the stub itself, because git
+# will not look inside an excluded directory.
+node_modules/
+!verify/node_modules/
+verify/node_modules/*
+!verify/node_modules/@hermes/
+!verify/node_modules/@hermes/**
+!verify/node_modules/react/
+!verify/node_modules/react/**
+# ...but a nested node_modules inside a stub is an install, not part of the stub.
+verify/node_modules/@hermes/**/node_modules/
+verify/node_modules/react/**/node_modules/
 *.zip
 # local dated backups, worktrees and byte-code are never part of a release
 *.bak-*
