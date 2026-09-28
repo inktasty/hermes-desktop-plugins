@@ -577,8 +577,11 @@ async function testSessionUsage() {
 
   // Functional tests run against an installed copy so the SCRIPTS_DIR token is
   // resolved the same way install.sh resolves it.
-  const { mod } = await loadPlugin('session-usage', { fresh: 1, scriptsDir: '/tmp/hdp-test/scripts' })
+  const { mod, ns: suNs } = await loadPlugin('session-usage', { fresh: 1, scriptsDir: '/tmp/hdp-test/scripts' })
   check('id matches folder', mod.id === 'session-usage', mod.id)
+  // The helper is duplicated per plugin, so pin session-usage's copy as well.
+  check('shell quote: session-usage single-quotes a POSIX path', suNs.shellQuote('/x y/a.py') === "'/x y/a.py'", suNs.shellQuote('/x y/a.py'))
+  check('shell quote: session-usage double-quotes a Windows path', suNs.shellQuote('C:/x y/a.py') === '"C:/x y/a.py"', suNs.shellQuote('C:/x y/a.py'))
 
   // Baseline case with default Linux-style python3 success
   sdk.setRpc(async (method, params) => {
@@ -1039,6 +1042,18 @@ async function testOpencodeUsage() {
   check('page freshness: the window is exactly 30 minutes',
     ns.pageStale(1e12 - 30 * 60000 - 1, 1e12) === true && ns.pageStale(1e12 - 30 * 60000 + 1, 1e12) === false,
     'at 30m-1ms and 30m+1ms')
+
+  // The quoting has to follow the GATEWAY's shell, which is not necessarily this
+  // platform's: POSIX sh needs single quotes (double quotes would still expand a
+  // literal $ or backtick in the path), while cmd.exe on a Windows-hosted gateway
+  // needs double quotes (it treats a single quote as a literal character).
+  check('shell quote: a POSIX path is single-quoted', ns.shellQuote('/home/x/scripts/a.py') === "'/home/x/scripts/a.py'", ns.shellQuote('/home/x/scripts/a.py'))
+  check('shell quote: a space is protected on POSIX', ns.shellQuote('/home/x y/scripts/a.py') === "'/home/x y/scripts/a.py'", ns.shellQuote('/home/x y/scripts/a.py'))
+  check('shell quote: a literal $ cannot expand on POSIX', ns.shellQuote('/home/$x/scripts/a.py') === "'/home/$x/scripts/a.py'", ns.shellQuote('/home/$x/scripts/a.py'))
+  check('shell quote: an embedded quote is escaped, not left to break out', ns.shellQuote("/home/it's/a.py").indexOf("'\\''") !== -1, ns.shellQuote("/home/it's/a.py"))
+  check('shell quote: a drive-letter path is double-quoted for cmd.exe', ns.shellQuote('C:/Users/x/scripts/a.py') === '"C:/Users/x/scripts/a.py"', ns.shellQuote('C:/Users/x/scripts/a.py'))
+  check('shell quote: a backslash path counts as Windows', ns.shellQuote('C:\\Users\\x\\a.py') === '"C:\\Users\\x\\a.py"', ns.shellQuote('C:\\Users\\x\\a.py'))
+
   const refreshBtn = primOf(pageOut, 'Button').find(b => b.props.children === 'Refresh')
   const requestsBefore = sdk.requests.length
   if (refreshBtn) refreshBtn.props.onClick()

@@ -48,8 +48,9 @@ if (-not $ScriptsDir) {
 # Plugin sources are read from this script's own repo clone, never from AppDir.
 $repoRoot = $PSScriptRoot
 
-# $PSScriptRoot is populated only when the script runs from a file. Dot-sourcing or
-# iex leaves it empty, and every source path below would then resolve against nothing.
+# $PSScriptRoot is populated only when the script runs from a file. Invoking it from a
+# string (iex) leaves it empty, and every source path below would then resolve against
+# nothing.
 if (-not $repoRoot) {
     Write-Host 'error: $PSScriptRoot is empty; run this with -File, not dot-sourced or via iex.'
     exit 1

@@ -70,6 +70,24 @@ const SCRIPT_NAME = 'opencode_go_usage.py'
 const MODELS_SCRIPT = 'opencode_go_models.py'
 const SCRIPTS_DIR = '__HERMES_SCRIPTS__'
 const PY_CANDIDATES = ['python3', 'python', 'py -3']
+
+// The command that runs a gateway script is executed by the GATEWAY's shell, not by
+// this process, so the quoting has to match whatever that shell is. POSIX sh wants
+// single quotes: double quotes still expand a literal $ or backtick in the path,
+// single quotes do not, and an embedded quote is closed, escaped and reopened.
+// cmd.exe on a Windows-hosted gateway is the opposite -- it treats a single quote as
+// a literal character and only strips double quotes, so the POSIX form would leave
+// the quotes in the filename and every interpreter candidate would fail. The scripts
+// path says which platform we are on: a drive letter or a backslash is Windows.
+// Pure and exported so the harness can pin both forms.
+export function shellQuote(p) {
+  const s = String(p == null ? '' : p)
+  const windows = /^[A-Za-z]:[\\/]/.test(s) || s.indexOf('\\') !== -1
+  return windows
+    ? '"' + s.replace(/"/g, '\\"') + '"'
+    : "'" + s.replace(/'/g, "'\\''") + "'"
+}
+
 const CONSOLE_URL = 'https://opencode.ai/workspace'
 const WINDOW_ORDER = ['rolling', 'weekly', 'monthly']
 
@@ -1542,13 +1560,12 @@ export default {
       const scriptPath = SCRIPTS_DIR + '/' + scriptName
       for (const py of candidates) {
         try {
-          // Single-quoted for the shell. A scripts dir containing a space
-          // (C:/Users/John Smith/..., ~/Library/Application Support/...) otherwise
-          // splits into two argv tokens and the failure reads as a missing python
-          // instead of a bad path. Single quotes also stop a literal $ or backtick
-          // expanding, which double quotes do not; an embedded single quote is
-          // closed, escaped and reopened, so no path can break out of the quoting.
-          const quotedPath = "'" + String(scriptPath).replace(/'/g, "'\\''") + "'"
+          // A scripts dir containing a space (C:/Users/John Smith/...,
+          // ~/Library/Application Support/...) otherwise splits into two argv tokens
+          // and the failure reads as a missing python instead of a bad path.
+          // shellQuote picks the form the GATEWAY's shell needs, which is not
+          // necessarily this platform's.
+          const quotedPath = shellQuote(scriptPath)
           const resp = await host.request('shell.exec', { command: py + ' ' + quotedPath })
           const stdout = resp && resp.stdout ? String(resp.stdout) : ''
           if (stdout) sawOutput = true

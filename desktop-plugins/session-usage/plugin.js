@@ -27,6 +27,24 @@ const SCRIPT_NAME = 'model_price_lookup.py'
 const SCRIPTS_DIR = '__HERMES_SCRIPTS__'
 const PY_CANDIDATES = ['python3', 'python', 'py -3']
 
+// The command that runs a gateway script is executed by the GATEWAY's shell, not by
+// this process, so the quoting has to match whatever that shell is. POSIX sh wants
+// single quotes: double quotes still expand a literal $ or backtick in the path,
+// single quotes do not, and an embedded quote is closed, escaped and reopened.
+// cmd.exe on a Windows-hosted gateway is the opposite -- it treats a single quote as
+// a literal character and only strips double quotes, so the POSIX form would leave
+// the quotes in the filename and every interpreter candidate would fail. The scripts
+// path says which platform we are on: a drive letter or a backslash is Windows.
+// Pure and exported so the harness can pin both forms.
+export function shellQuote(p) {
+  const s = String(p == null ? '' : p)
+  const windows = /^[A-Za-z]:[\\/]/.test(s) || s.indexOf('\\') !== -1
+  return windows
+    ? '"' + s.replace(/"/g, '\\"') + '"'
+    : "'" + s.replace(/'/g, "'\\''") + "'"
+}
+
+
 // Live atoms are resolved ONCE at import, each with a null-atom fallback: a
 // build that lacks one of them can then never throw inside a render, and every
 // useValue call stays unconditional (a conditional hook shifts React's call
@@ -406,12 +424,14 @@ export default {
       const scriptPath = SCRIPTS_DIR + '/' + SCRIPT_NAME
       for (const py of candidates) {
         try {
-          // Single-quoted for the same reason as opencode-usage: a scripts path
-          // with a space otherwise splits into two argv tokens, and single quotes
-          // also stop a literal $ or backtick expanding. An embedded single quote
-          // is closed, escaped and reopened.
-          const quotedPath = "'" + String(scriptPath).replace(/'/g, "'\\''") + "'"
-          const resp = await host.request('shell.exec', { command: py + ' ' + quotedPath + (args ? ' ' + args : '') })
+          // A scripts path with a space otherwise splits into two argv tokens.
+          // shellQuote picks the form the GATEWAY's shell needs; see it for why the
+          // platform that matters is the gateway's, not this one. The model id is
+          // quoted the same way rather than concatenated raw: it comes from the
+          // usage payload, so an odd character must not reach the shell unquoted.
+          const quotedPath = shellQuote(scriptPath)
+          const quotedArgs = args ? ' ' + shellQuote(args) : ''
+          const resp = await host.request('shell.exec', { command: py + ' ' + quotedPath + quotedArgs })
           const stdout = resp && resp.stdout ? String(resp.stdout) : ''
           const code = resp && typeof resp.code === 'number' ? resp.code : 0
           lastCode = code
