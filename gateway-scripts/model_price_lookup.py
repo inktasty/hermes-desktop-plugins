@@ -154,7 +154,10 @@ def resolve_lookup(cache: dict, provider: str, model: str) -> tuple:
 
 def main() -> None:
     argv = sys.argv[1:]
-    model = (argv[0] if len(argv) > 0 else "").strip()
+    # Tolerate a caller that hands the id through shell quoting the shell did not strip
+    # (a Windows gateway's cmd.exe keeps single quotes literal), so that a quoting
+    # mistake upstream degrades to a correct lookup instead of an empty registry hit.
+    model = (argv[0] if len(argv) > 0 else "").strip().strip("'\"")
     provider = (argv[1] if len(argv) > 1 else "").strip()
     if not (model and provider):
         cfg_model, cfg_provider = config_model_provider()

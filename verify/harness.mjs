@@ -580,8 +580,49 @@ async function testSessionUsage() {
   const { mod, ns: suNs } = await loadPlugin('session-usage', { fresh: 1, scriptsDir: '/tmp/hdp-test/scripts' })
   check('id matches folder', mod.id === 'session-usage', mod.id)
   // The helper is duplicated per plugin, so pin session-usage's copy as well.
-  check('shell quote: session-usage single-quotes a POSIX path', suNs.shellQuote('/x y/a.py') === "'/x y/a.py'", suNs.shellQuote('/x y/a.py'))
-  check('shell quote: session-usage double-quotes a Windows path', suNs.shellQuote('C:/x y/a.py') === '"C:/x y/a.py"', suNs.shellQuote('C:/x y/a.py'))
+  check('shell quote: session-usage POSIX form', suNs.shellQuote('/x y/a.py', false) === "'/x y/a.py'", suNs.shellQuote('/x y/a.py', false))
+  check('shell quote: session-usage cmd.exe form', suNs.shellQuote('C:/x y/a.py', true) === '"C:/x y/a.py"', suNs.shellQuote('C:/x y/a.py', true))
+  check('shell quote: session-usage takes the gateway form for a non-path value', suNs.shellQuote('C:/x y/a.py') === "'C:/x y/a.py'", suNs.shellQuote('C:/x y/a.py'))
+
+  // Composition for both platforms -- the whole command is what broke before, and a
+  // pure helper check cannot see it. The model id is NOT a path, so it must take the
+  // gateway's form, and it must arrive as one bare token: an id handed over already
+  // JSON-encoded kept its own double quotes through the shell and looked up nothing.
+  let composedFresh = 92
+  for (const [composedDir, composedWin] of [['/tmp/hdp-test/scripts', false], ['C:/Users/x/hermes/scripts', true]]) {
+    const composed = []
+    const { mod: cmod } = await loadPlugin('session-usage', { fresh: composedFresh++, scriptsDir: composedDir })
+    const { ctx: cctx, contributions: ccontrib } = captureCtx()
+    cctx.storage = { get: () => undefined, set: () => {} }
+    sdk.setRpc(async (method, params) => {
+      if (method === 'session.usage') return USAGE
+      if (method === 'shell.exec') {
+        composed.push(String(params && params.command || ''))
+        return { stdout: priceLine + '\n', stderr: '', code: 0 }
+      }
+      return {}
+    })
+    stubTimers()
+    Date.now = () => Date.UTC(2026, 8, 16, 20, 0)
+    cmod.register(cctx)
+    restoreTimers()
+    sdk.host.state.focusedSessionId.set('sess-c' + (composedWin ? 'w' : 'p'))
+    sdk.host.state.focusedUsage.set(USAGE)
+    await settle(12)
+    // fetchOnce() at register ran before a session was focused, so it covered only the
+    // configured default. Drive the poll by hand the way the interval would: that is the
+    // path that carries the session's own model id, which is what the app actually sends.
+    const pollNow = (timers.find(t => t.ms === 120000) || {}).fn
+    if (typeof pollNow === 'function') await pollNow()
+    await settle(12)
+    const q = composedWin ? '"' : "'"
+    const wantPath = 'python3 ' + q + composedDir + '/model_price_lookup.py' + q
+    const wantArg = q + USAGE.model + q
+    check('command composition: ' + (composedWin ? 'Windows' : 'POSIX') + ' gateway quotes the path and the bare model token',
+      composed.length > 0 && composed.every(c => c === wantPath || c === wantPath + ' ' + wantArg) &&
+        composed.some(c => c === wantPath + ' ' + wantArg),
+      JSON.stringify(composed))
+  }
 
   // Baseline case with default Linux-style python3 success
   sdk.setRpc(async (method, params) => {
@@ -1043,17 +1084,18 @@ async function testOpencodeUsage() {
     ns.pageStale(1e12 - 30 * 60000 - 1, 1e12) === true && ns.pageStale(1e12 - 30 * 60000 + 1, 1e12) === false,
     'at 30m-1ms and 30m+1ms')
 
-  // The quoting has to follow the GATEWAY's shell, which is not necessarily this
-  // platform's: POSIX sh needs single quotes (double quotes would still expand a
-  // literal $ or backtick in the path), while cmd.exe on a Windows-hosted gateway
-  // needs double quotes (it treats a single quote as a literal character).
-  check('shell quote: a POSIX path is single-quoted', ns.shellQuote('/home/x/scripts/a.py') === "'/home/x/scripts/a.py'", ns.shellQuote('/home/x/scripts/a.py'))
-  check('shell quote: a space is protected on POSIX', ns.shellQuote('/home/x y/scripts/a.py') === "'/home/x y/scripts/a.py'", ns.shellQuote('/home/x y/scripts/a.py'))
-  check('shell quote: a literal $ cannot expand on POSIX', ns.shellQuote('/home/$x/scripts/a.py') === "'/home/$x/scripts/a.py'", ns.shellQuote('/home/$x/scripts/a.py'))
-  check('shell quote: an embedded quote is escaped, not left to break out', ns.shellQuote("/home/it's/a.py").indexOf("'\\''") !== -1, ns.shellQuote("/home/it's/a.py"))
-  check('shell quote: a drive-letter path is double-quoted for cmd.exe', ns.shellQuote('C:/Users/x/scripts/a.py') === '"C:/Users/x/scripts/a.py"', ns.shellQuote('C:/Users/x/scripts/a.py'))
-  check('shell quote: a backslash path counts as Windows', ns.shellQuote('C:\\Users\\x\\a.py') === '"C:\\Users\\x\\a.py"', ns.shellQuote('C:\\Users\\x\\a.py'))
-
+  // The quoting follows the GATEWAY's shell, which is not necessarily this platform's:
+  // POSIX sh needs single quotes (double quotes would still expand a literal $ or
+  // backtick in the path), cmd.exe needs double quotes (it treats a single quote as a
+  // literal character). The form comes from the gateway -- its scripts dir -- and never
+  // from the value being quoted, because a model id carries no clue about the platform.
+  check('shell quote: POSIX sh form', ns.shellQuote('/home/x/scripts/a.py', false) === "'/home/x/scripts/a.py'", ns.shellQuote('/home/x/scripts/a.py', false))
+  check('shell quote: cmd.exe form', ns.shellQuote('C:/Users/x/scripts/a.py', true) === '"C:/Users/x/scripts/a.py"', ns.shellQuote('C:/Users/x/scripts/a.py', true))
+  check('shell quote: a space is protected on both', ns.shellQuote('/home/x y/a.py', false) === "'/home/x y/a.py'" && ns.shellQuote('C:/x y/a.py', true) === '"C:/x y/a.py"', 'both')
+  check('shell quote: a literal $ cannot expand on POSIX', ns.shellQuote('/home/$x/a.py', false) === "'/home/$x/a.py'", ns.shellQuote('/home/$x/a.py', false))
+  check('shell quote: an embedded quote is escaped, not left to break out', ns.shellQuote("/home/it's/a.py", false).indexOf("'\\''") !== -1, ns.shellQuote("/home/it's/a.py", false))
+  check('shell quote: the gateway decides, not the value', ns.shellQuote('C:/Users/x/a.py') === ns.shellQuote('C:/Users/x/a.py', false) && ns.shellQuote('/home/x/a.py') === ns.shellQuote('/home/x/a.py', false), ns.shellQuote('C:/Users/x/a.py'))
+  check('shell quote: a double quote is refused for cmd.exe', (() => { try { ns.shellQuote('C:/a"b', true); return false } catch (e) { return true } })(), 'throws')
   const refreshBtn = primOf(pageOut, 'Button').find(b => b.props.children === 'Refresh')
   const requestsBefore = sdk.requests.length
   if (refreshBtn) refreshBtn.props.onClick()
@@ -1623,6 +1665,32 @@ async function testOpencodeUsage() {
   check('settings: every change is persisted under one key',
         setSettingsWrites.length >= 4 && setSettingsWrites[setSettingsWrites.length - 1][1].showRawNames === true,
         JSON.stringify(setWrites.map(w => [w[0], w[1] && w[1].chipSource, w[1] && w[1].chipLabel, w[1] && w[1].showRawNames])))
+
+  // Composition, not just the helper: what actually broke was the whole command, so pin
+  // it for a Windows gateway too. A single-quoted path reaches python with the quotes
+  // attached, so every interpreter candidate fails and the chip reports no python.
+  {
+    const composed = []
+    const { mod: wmod } = await loadPlugin('opencode-usage', { fresh: 91, scriptsDir: 'C:/Users/x/hermes/scripts' })
+    const { ctx: wctx } = captureCtx()
+    sdk.setRpc(async (method, params) => {
+      if (method === 'shell.exec') {
+        const cmd = String(params && params.command || '')
+        composed.push(cmd)
+        if (cmd.includes('opencode_go_models.py')) return { stdout: packPayload(modelsPayload), stderr: '', code: 0 }
+        if (cmd.includes('opencode_go_usage.py')) return { stdout: JSON.stringify(snap), stderr: '', code: 0 }
+      }
+      return {}
+    })
+    stubTimers()
+    Date.now = () => Date.UTC(2026, 8, 16, 20, 0)
+    wmod.register(wctx)
+    restoreTimers()
+    await settle(12)
+    const winPath = /^python3 "C:\/Users\/x\/hermes\/scripts\/[a-z_0-9]+\.py"/
+    check('command composition: a Windows gateway gets a double-quoted script path, no single quote anywhere',
+      composed.length > 0 && composed.every(c => winPath.test(c) && c.indexOf("'") === -1), JSON.stringify(composed))
+  }
 
   Date.now = realNow
 }

@@ -28,20 +28,29 @@ const SCRIPTS_DIR = '__HERMES_SCRIPTS__'
 const PY_CANDIDATES = ['python3', 'python', 'py -3']
 
 // The command that runs a gateway script is executed by the GATEWAY's shell, not by
-// this process, so the quoting has to match whatever that shell is. POSIX sh wants
-// single quotes: double quotes still expand a literal $ or backtick in the path,
-// single quotes do not, and an embedded quote is closed, escaped and reopened.
-// cmd.exe on a Windows-hosted gateway is the opposite -- it treats a single quote as
-// a literal character and only strips double quotes, so the POSIX form would leave
-// the quotes in the filename and every interpreter candidate would fail. The scripts
-// path says which platform we are on: a drive letter or a backslash is Windows.
-// Pure and exported so the harness can pin both forms.
-export function shellQuote(p) {
+// this process, so the quoting has to match whatever THAT shell is. POSIX sh wants
+// single quotes: double quotes still expand a literal $ or backtick in the path, and
+// an embedded quote is closed, escaped and reopened. cmd.exe on a Windows-hosted
+// gateway is the opposite -- it treats a single quote as a literal character and only
+// strips double quotes, so the POSIX form would leave the quotes in the filename and
+// every interpreter candidate would fail.
+//
+// The form is decided ONCE, from the scripts dir -- the one value that really is the
+// gateway's own path -- and never from the value being quoted: a model id carries no
+// clue about the platform, so testing the value answered "POSIX" on every gateway and
+// broke Windows ones.
+const GATEWAY_WINDOWS = /^[A-Za-z]:[\\/]/.test(String(SCRIPTS_DIR)) || String(SCRIPTS_DIR).indexOf('\\') !== -1
+
+export function shellQuote(p, windows = GATEWAY_WINDOWS) {
   const s = String(p == null ? '' : p)
-  const windows = /^[A-Za-z]:[\\/]/.test(s) || s.indexOf('\\') !== -1
-  return windows
-    ? '"' + s.replace(/"/g, '\\"') + '"'
-    : "'" + s.replace(/'/g, "'\\''") + "'"
+  if (windows) {
+    // cmd.exe's own escape inside double quotes is "", not \", and a Windows path
+    // cannot contain a double quote at all: rather than hand cmd a token that means
+    // something different to the program than to the shell, refuse the value.
+    if (s.indexOf('"') !== -1) throw new Error('cannot quote a double quote for cmd.exe')
+    return '"' + s + '"'
+  }
+  return "'" + s.replace(/'/g, "'\\''") + "'"
 }
 
 
@@ -454,7 +463,7 @@ export default {
       const want = String(model || '').trim()
       if (ratesFor === want) return
       try {
-        const parsed = await runPriceScript(want ? JSON.stringify(want) : '')
+        const parsed = await runPriceScript(want)
         ratesFor = parsed ? want : null
         ratesData.set(parsed)
         ratesError.set(null)
