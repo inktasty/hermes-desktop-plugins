@@ -403,6 +403,7 @@ def main() -> int:
         benched, until = bench_info(row, now)
         base = {
             "index": row["index"],
+            "ordinal": position + 1,  # display position; the plugin names keys 'Key N'
             "label": row["label"],
             "priority": row["priority"],
             "source": row["source"],

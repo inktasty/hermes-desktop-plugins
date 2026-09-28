@@ -75,8 +75,103 @@ const $modelsError = atom(null) // last models failure text | null
 const $modelsAt = atom(null)    // ms epoch of the last GOOD models fetch
 const $modelsLoading = atom(false)
 
+// ---- settings ---------------------------------------------------------------
+// Persisted through ctx.storage, so a choice survives a reload. Every field has a
+// default and a stored blob is sanitised field by field, so a value written by an
+// older build can never blank a control or wedge the plugin.
+const SETTINGS_KEY = 'settings_v1'
+const DEFAULT_SETTINGS = {
+  chipSource: 'auto',   // 'auto' (the key in use) | 'combined' | 'key:N'
+  chipLabel: true,      // show the (N/total) position marker on the chip
+  refreshSec: Math.round(POLL_MS / 1000), // usage poll interval (POLL_MS unless changed)
+  warnAt: 60,           // the % at which a window turns amber
+  showRawNames: false   // reveal the pool's own credential labels
+}
+const REFRESH_CHOICES = [30, 60, 300]
+const WARN_CHOICES = [60, 75, 85]
+const WARN_CEILING = 85 // 'bad' starts here, so a warnAt at or above it never shows
+const $settings = atom({ ...DEFAULT_SETTINGS })
+
+// Keys are named by position, not by their configured label: a pool label can be
+// a variable name, a fingerprint or anything else the user typed, and none of
+// that belongs in a status line. The real label stays available in a tooltip (and
+// behind the 'show credential names' setting) so a report is still actionable.
+function displayName(k, position) {
+  const n = k && typeof k.ordinal === 'number' ? k.ordinal : position || 1
+  return 'Key ' + n
+}
+
+function sanitizeSettings(raw) {
+  const out = { ...DEFAULT_SETTINGS }
+  if (raw && typeof raw === 'object') {
+    for (const field of Object.keys(DEFAULT_SETTINGS)) {
+      if (raw[field] !== undefined && raw[field] !== null) out[field] = raw[field]
+    }
+  }
+  // An unknown chip source falls back to auto rather than rendering nothing.
+  const source = String(out.chipSource)
+  if (source !== 'auto' && source !== 'combined' && !/^key:[1-9][0-9]*$/.test(source)) {
+    out.chipSource = DEFAULT_SETTINGS.chipSource
+  }
+  out.refreshSec = REFRESH_CHOICES.indexOf(Number(out.refreshSec)) >= 0 ? Number(out.refreshSec) : DEFAULT_SETTINGS.refreshSec
+  out.warnAt = WARN_CHOICES.indexOf(Number(out.warnAt)) >= 0 ? Number(out.warnAt) : DEFAULT_SETTINGS.warnAt
+  out.chipLabel = out.chipLabel !== false
+  out.showRawNames = out.showRawNames === true
+  return out
+}
+
+// A synthetic window per period: the mean of every key that reports it, so the
+// chip can say what the whole pool is spending. Mean-used and mean-projected stay
+// consistent with each other because every key shares the same window boundaries
+// and elapsed time; the reset shown is the soonest, i.e. when capacity returns.
+function combinedWindows(keys) {
+  const out = {}
+  for (const key of WINDOW_ORDER) {
+    const rows = (keys || []).map(k => (k && k.windows ? k.windows[key] : null)).filter(Boolean)
+    if (!rows.length) continue
+    const mean = field => {
+      const vals = rows.map(r => r[field]).filter(v => typeof v === 'number' && Number.isFinite(v))
+      return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null
+    }
+    const used = mean('used_percent')
+    const resets = rows.map(r => parseMs(r.resets_at)).filter(v => v != null)
+    const projected = mean('projected_percent')
+    out[key] = {
+      ...rows[0],
+      used_percent: used,
+      remaining_percent: used == null ? null : Math.max(0, 100 - used),
+      elapsed_percent: mean('elapsed_percent'),
+      projected_percent: projected,
+      on_pace: projected == null ? null : projected <= 100,
+      hits_limit_at: null,
+      resets_at: resets.length ? new Date(Math.min(...resets)).toISOString() : rows[0].resets_at,
+      combined_keys: rows.length
+    }
+  }
+  return WINDOW_ORDER.map(k => out[k]).filter(Boolean)
+}
+
+// Which windows the chip reports, and the marker that says where they came from.
+function chipSelection(keys, settings) {
+  const list = Array.isArray(keys) ? keys : []
+  if (!list.length) return { windows: [], marker: null }
+  if (list.length === 1) return { windows: windowList({ windows: list[0].windows }), marker: null }
+  const source = String(settings.chipSource)
+  if (source === 'combined') return { windows: combinedWindows(list), marker: 'all' }
+  let chosen = null
+  if (source.startsWith('key:')) {
+    const n = Number(source.slice(4))
+    chosen = list.find(k => k && k.ordinal === n) || null
+  }
+  if (!chosen) chosen = list.find(k => k && k.active) || list[0]
+  const n = typeof chosen.ordinal === 'number' ? chosen.ordinal : list.indexOf(chosen) + 1
+  return { windows: windowList({ windows: chosen.windows }), marker: n + '/' + list.length }
+}
+
 let refresh = async () => {}
 let refreshModels = async () => {}
+let applySettings = () => {}  // set by register(); the settings UI calls this
+let refreshTimer = null       // usage poll timer; re-armed when refreshSec changes
 let pluginCtx = null          // set by register(); render components live at module scope
 
 // The app blocks every authored pop-up by policy in its main process, so the
@@ -181,8 +276,11 @@ const pctText = value => (value == null ? '--' : (Math.round(value * 10) / 10) +
 
 function toneOf(used) {
   if (used == null) return 'muted'
-  if (used >= 85) return 'bad'
-  if (used >= 60) return 'warn'
+  if (used >= WARN_CEILING) return 'bad'
+  // Amber starts at the configured threshold; 'bad' is checked first, so a warnAt
+  // at the ceiling just means there is no amber stage.
+  const warnAt = Number($settings.get().warnAt)
+  if (used >= (Number.isFinite(warnAt) ? warnAt : DEFAULT_SETTINGS.warnAt)) return 'warn'
   return 'good'
 }
 
@@ -1024,33 +1122,41 @@ export function ModelsTable({ models, error, initialControls }) {
 // One credential's own block: its name (and where it comes from) plus its own
 // three quota windows. The gateway returns one of these per key in the pool, so
 // a two-key account shows both limits instead of only the highest-priority one.
-function KeyBlock({ k, now }) {
+function KeyBlock({ k, now, settings }) {
   const wins = windowList({ windows: k.windows })
   const failed = k.ok === false || wins.length === 0
   // The pool benched this key after a failure (e.g. 'exhausted'): the badge says
   // so, and its cooldown end is worth carrying in the tooltip.
   const poolNote = k.pool_status && k.pool_status !== 'ok' ? String(k.pool_status) : null
-  const poolTitle = poolNote ? poolNote + (k.benched_until ? ' until ' + k.benched_until : '') : undefined
+  const poolTitle = poolNote ? poolNote + (k.benched_until ? ' until ' + k.benched_until : '') : null
+  // The credential's configured label is a tooltip / opt-in detail, never the
+  // heading: see displayName().
+  const raw = k.label ? String(k.label) : null
   const source = k.source ? String(k.source) : null
+  const showRaw = Boolean(settings && settings.showRawNames)
   return jsxs('div', {
     className: 'flex flex-col gap-3',
     children: [
       jsxs('div', {
         className: 'flex flex-wrap items-center gap-2',
+        title: [raw, source, poolTitle].filter(Boolean).join(' · ') || undefined,
         children: [
           jsx(StatusDot, { tone: failed ? 'bad' : k.benched ? 'warn' : 'good' }),
           jsx('span', {
             className: 'text-[0.75rem] font-medium text-foreground',
-            children: k.label || 'key'
+            children: displayName(k)
           }),
           k.active && !k.benched
             ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: 'in use' })
             : null,
-          source
+          showRaw && raw
+            ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-quaternary)', children: raw })
+            : null,
+          showRaw && source
             ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-quaternary)', children: source })
             : null,
           poolNote
-            ? jsx(Badge, { variant: 'warn', size: 'xs', title: poolTitle, children: poolNote })
+            ? jsx(Badge, { variant: 'warn', size: 'xs', title: poolTitle || undefined, children: poolNote })
             : null
         ]
       }),
@@ -1067,6 +1173,110 @@ function KeyBlock({ k, now }) {
   })
 }
 
+// ---- settings panel --------------------------------------------------------
+// Every control writes through applySettings(), which sanitises, persists the whole
+// blob and re-arms the poll timer, so a change is live at once and survives a
+// reload. Nothing here is required reading: the defaults are what the plugin did
+// before these controls existed.
+function SettingsPanel({ settings, keys }) {
+  const total = Array.isArray(keys) ? keys.length : 0
+  const rowClass = 'flex flex-wrap items-center gap-x-3 gap-y-2'
+  const labelClass = 'text-[0.6875rem] text-(--ui-text-quaternary)'
+  const save = patch => applySettings({ ...settings, ...patch })
+
+  const chipOptions = [
+    { id: 'auto', label: 'Key in use' },
+    { id: 'combined', label: 'Combined' }
+  ]
+  if (total > 1) {
+    for (let n = 1; n <= total; n += 1) chipOptions.push({ id: 'key:' + n, label: 'Key ' + n })
+  }
+
+  return jsxs('div', {
+    className: 'flex flex-col gap-3 pt-1',
+    children: [
+      jsx(Separator, {}),
+      jsx('div', {
+        className: 'text-[0.625rem] font-medium tracking-wide text-(--ui-text-quaternary) uppercase',
+        children: 'Settings'
+      }),
+
+      // Only meaningful with more than one credential: a control that cannot
+      // change anything is worse than no control.
+      total > 1
+        ? jsxs('div', {
+            className: rowClass,
+            children: [
+              jsx('span', { className: labelClass, children: 'Chip shows' }),
+              jsx(SegmentedControl, {
+                options: chipOptions,
+                value: String(settings.chipSource),
+                onChange: next => save({ chipSource: String(next) })
+              }),
+              jsx('span', { className: labelClass, children: 'Combined = the mean of every key, what the whole pool is spending' })
+            ]
+          })
+        : null,
+
+      jsxs('div', {
+        className: rowClass,
+        children: [
+          jsx(Switch, {
+            checked: settings.chipLabel !== false,
+            size: 'xs',
+            'aria-label': 'Show the key position on the chip',
+            onCheckedChange: next => save({ chipLabel: next === true })
+          }),
+          jsx('span', {
+            className: labelClass,
+            children: total > 1
+              ? 'Show the key position on the chip, e.g. (2/' + total + ')'
+              : 'Show the key position on the chip'
+          })
+        ]
+      }),
+
+      jsxs('div', {
+        className: rowClass,
+        children: [
+          jsx('span', { className: labelClass, children: 'Refresh every' }),
+          jsx(SegmentedControl, {
+            options: REFRESH_CHOICES.map(s => ({ id: String(s), label: s < 60 ? s + 's' : (s / 60) + 'm' })),
+            value: String(settings.refreshSec),
+            onChange: next => save({ refreshSec: Number(next) })
+          })
+        ]
+      }),
+
+      jsxs('div', {
+        className: rowClass,
+        children: [
+          jsx('span', { className: labelClass, children: 'Dot turns amber at' }),
+          jsx(SegmentedControl, {
+            options: WARN_CHOICES.map(w => ({ id: String(w), label: w + '%' })),
+            value: String(settings.warnAt),
+            onChange: next => save({ warnAt: Number(next) })
+          }),
+          jsx('span', { className: labelClass, children: 'Red starts at ' + WARN_CEILING + '%.' })
+        ]
+      }),
+
+      jsxs('div', {
+        className: rowClass,
+        children: [
+          jsx(Switch, {
+            checked: settings.showRawNames === true,
+            size: 'xs',
+            'aria-label': 'Show credential names from the gateway config',
+            onCheckedChange: next => save({ showRawNames: next === true })
+          }),
+          jsx('span', { className: labelClass, children: 'Show credential names from the gateway config' })
+        ]
+      })
+    ]
+  })
+}
+
 function UsagePage() {
   const snap = useValue($snap)
   const error = useValue($error)
@@ -1076,6 +1286,7 @@ function UsagePage() {
   const models = useValue($models)
   const modelsError = useValue($modelsError)
   const modelsAt = useValue($modelsAt)
+  const settings = useValue($settings)
 
   useEffect(() => {
     if (updatedAt == null || Date.now() - updatedAt > POLL_MS) void refresh()
@@ -1164,7 +1375,7 @@ function UsagePage() {
           keyList && keyList.length > 1
             ? jsx('div', {
                 className: 'flex flex-col gap-6',
-                children: keyList.map((k, index) => jsx(KeyBlock, { key: (k.label || 'key') + ':' + index, k, now }))
+                children: keyList.map((k, index) => jsx(KeyBlock, { key: 'k' + (k.ordinal || index), k, now, settings }))
               })
             : windows.length
               ? jsx('div', {
@@ -1179,6 +1390,8 @@ function UsagePage() {
                   }),
 
           jsx(ModelsTable, { models, error: modelsError }),
+
+          jsx(SettingsPanel, { settings, keys: keyList }),
 
           jsxs('div', {
             className: 'mt-auto flex flex-col gap-3 pt-1',
@@ -1211,15 +1424,14 @@ function UsageChip() {
   const loading = useValue($loading)
   const now = useValue($now)
 
-  // Follow the key the gateway is believed to be serving, not simply the first
-  // one: a benched top-priority key would otherwise report its capped-out
-  // numbers here as if they were what the account is spending right now. Falls
-  // back to the first key (then to the payload's own windows) when the gateway
-  // gives no active marker, so a single-key install reads as it always did.
+  const settings = useValue($settings)
+  // Which key the chip reports is a setting: the key in use (default), the whole
+  // pool combined, or one specific key. Following the key in use matters because a
+  // benched top-priority key would otherwise report its capped-out numbers here as
+  // if they were what the account is spending right now.
   const keys = snap && Array.isArray(snap.keys) ? snap.keys : null
-  const activeKey = keys && keys.length ? keys.find(k => k && k.active) || keys[0] : null
-  const own = activeKey ? windowList({ windows: activeKey.windows }) : []
-  const windows = own.length ? own : windowList(snap)
+  const picked = chipSelection(keys, settings)
+  const windows = picked.windows.length ? picked.windows : windowList(snap)
 
   const worst = windows.reduce((acc, w) => Math.max(acc, w.used_percent || 0), 0)
   const text = windows.length
@@ -1227,19 +1439,26 @@ function UsageChip() {
     : loading
       ? '...'
       : '--'
-  // With more than one key the chip names the one it is reporting, so the
-  // status bar says which credential those numbers belong to.
-  const label = keys && keys.length > 1 && activeKey && activeKey.label ? String(activeKey.label) : null
-  const shortLabel = label && label.length > 18 ? label.slice(0, 17) + '…' : label
+  // The position marker ('2/2', 'all') says where the numbers came from without
+  // repeating a credential's configured name.
+  const marker = settings.chipLabel && picked.marker ? '(' + picked.marker + ')' : null
 
   const tip = keys && keys.length > 1
-    ? keys.map(k => {
+    ? (picked.marker === 'all'
+        ? ['combined pool: ' + (windows.length
+            ? windows.map(w => (w.used_percent == null ? '--' : Math.round(w.used_percent))).join('/') + '%'
+            : 'no data')]
+        : []
+      ).concat(keys.map(k => {
         const ks = windowList({ windows: k.windows })
         const pcts = ks.length
           ? ks.map(w => (w.used_percent == null ? '--' : Math.round(w.used_percent))).join('/') + '%'
           : 'no data'
-        return (k.active ? 'in use' : k.benched ? 'benched' : 'standby') + ': ' + (k.label || 'key') + ' ' + pcts
-      }).join('   |   ') + '   (click for the full page)'
+        const shown = picked.marker && picked.marker !== 'all' && String(picked.marker).split('/')[0] === String(k.ordinal)
+        const standing = k.active ? 'in use' : k.benched ? 'benched' : 'standby'
+        const raw = settings.showRawNames && k.label ? ' [' + k.label + ']' : ''
+        return (shown ? '▶ ' : '') + displayName(k) + ' · ' + standing + raw + ' ' + pcts
+      })).join('   |   ') + '   (click for the full page)'
     : windows.length
       ? windows.map(w => {
           const at = parseMs(w.resets_at)
@@ -1264,8 +1483,8 @@ function UsageChip() {
     children: [
       jsx(StatusDot, { tone: windows.length ? toneOf(worst) : 'muted' }),
       jsx('span', { children: 'Go' }),
-      shortLabel
-        ? jsx('span', { className: 'text-(--ui-text-quaternary)', children: shortLabel })
+      marker
+        ? jsx('span', { className: 'text-(--ui-text-quaternary)', children: marker })
         : null,
       jsx('span', { className: 'text-(--ui-text-quaternary)', children: text })
     ]
@@ -1313,6 +1532,24 @@ export default {
       }
       const tried = (cached ? [cached] : PY_CANDIDATES).join(', ')
       throw new Error('no working python on the gateway shell (tried ' + tried + ')' + (lastCode != null ? '; exit ' + lastCode : '') + (lastError ? '; ' + (lastError.message || lastError) : '') + (sawOutput ? '; the script printed output this plugin could not parse (larger than the gateway reply limit?)' : '') + '; run install.sh on the gateway')
+    }
+
+    // Settings: hydrate from storage (sanitised), and hand the settings UI a way
+    // to persist a change and re-arm the poll timer if the interval moved.
+    const storedSettings = ctx.storage && typeof ctx.storage.get === 'function' ? ctx.storage.get(SETTINGS_KEY, null) : null
+    $settings.set(sanitizeSettings(storedSettings))
+
+    function armRefreshTimer() {
+      if (refreshTimer) clearInterval(refreshTimer)
+      const secs = Number($settings.get().refreshSec)
+      refreshTimer = setInterval(() => void refresh(), (Number.isFinite(secs) && secs >= 10 ? secs : DEFAULT_SETTINGS.refreshSec) * 1000)
+    }
+
+    applySettings = next => {
+      const clean = sanitizeSettings(next)
+      $settings.set(clean)
+      if (ctx.storage && typeof ctx.storage.set === 'function') ctx.storage.set(SETTINGS_KEY, clean)
+      armRefreshTimer()
     }
 
     // Storage key v2: the payload gained the per-model `released` date, so a v1
@@ -1366,8 +1603,8 @@ export default {
     }
 
     void refresh()
-    const pollTimer = setInterval(() => void refresh(), POLL_MS)
     const tickTimer = setInterval(() => $now.set(Date.now()), TICK_MS)
+    armRefreshTimer() // refreshSec is a setting, so the poll timer is re-armable
 
     ctx.registerMany([
       {
@@ -1414,7 +1651,7 @@ export default {
     ])
 
     const dispose = () => {
-      clearInterval(pollTimer)
+      if (refreshTimer) clearInterval(refreshTimer)
       clearInterval(tickTimer)
     }
     if (typeof ctx.onDispose === 'function') ctx.onDispose(dispose)

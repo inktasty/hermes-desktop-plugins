@@ -1019,8 +1019,11 @@ async function testOpencodeUsage() {
   check('models with no registry date sink to the end of the release sort',
     newest.slice(-2).sort().join(',') === 'low-cap,served-no-price', newest.join(' '))
 
-  // The bar as the page renders it, with no control touched.
-  const segs = primOf(pageOut, 'SegmentedControl')
+  // The bar as the page renders it, with no control touched. Filter to the models
+  // sort bar: the page also carries the plugin's own settings controls, which are
+  // SegmentedControls too.
+  const segs = primOf(pageOut, 'SegmentedControl').filter(s =>
+    (s.props.options || []).some(o => o && (o.label === 'Cheapest' || o.label === 'Newest')))
   check('the models page renders one sort control per key', segs.length === 2, String(segs.length))
   check('the sort controls offer cheapest/priciest and newest/oldest',
     segs.map(s => (s.props.options || []).map(o => o.label).join('/')).join(' | ') === 'Default/Cheapest/Priciest | Default/Newest/Oldest',
@@ -1367,12 +1370,12 @@ async function testOpencodeUsage() {
     ...base,
     keys: [
       {
-        index: 0, label: 'OPENCODE_GO_API_KEY', priority: 0,
+        index: 0, ordinal: 1, label: 'OPENCODE_GO_API_KEY', priority: 0,
         source: 'env:OPENCODE_GO_API_KEY', pool_status: 'exhausted', ok: true,
         active: false, benched: true, benched_until: '2026-10-13T08:40:23Z', windows: base.windows
       },
       {
-        index: 1, label: 'secondary', priority: 1, source: 'manual', pool_status: null, ok: true,
+        index: 1, ordinal: 2, label: 'secondary', priority: 1, source: 'manual', pool_status: null, ok: true,
         active: true, benched: false, benched_until: null,
         windows: {
           rolling: { ...base.windows.rolling, used_percent: 6, remaining_percent: 94 },
@@ -1399,18 +1402,23 @@ async function testOpencodeUsage() {
   const twoPage = twoContributions.find(c => c.area === 'routes')
   const twoOut = render(twoPage.render)
   check('multi-key: page renders without error', !twoOut.err, twoOut.err && twoOut.err.message)
-  check('multi-key: both key labels render', twoOut.text.includes('OPENCODE_GO_API_KEY') && twoOut.text.includes('secondary'), twoOut.text.slice(0, 300))
+  // Keys are named by position, never by the label the gateway config happens to
+  // use: a stranger installing this from the public repo may have called theirs
+  // anything, and a configured name is not what a status line needs.
+  check('multi-key: both keys render under position names', twoOut.text.includes('Key 1') && twoOut.text.includes('Key 2'), twoOut.text.slice(0, 300))
+  check('multi-key: the configured credential names are not displayed',
+        !twoOut.text.includes('OPENCODE_GO_API_KEY') && !twoOut.text.includes('secondary'), twoOut.text.slice(0, 300))
   check('multi-key: the benched key is labelled', twoOut.text.includes('exhausted'), twoOut.text.slice(0, 300))
-  check('multi-key: the key in use is marked, the benched one is not',
-        twoOut.text.includes('in use') && !twoOut.text.includes('OPENCODE_GO_API_KEY in use'),
-        twoOut.text.slice(0, 400))
+  check('multi-key: the key in use is marked', twoOut.text.includes('in use'), twoOut.text.slice(0, 400))
   check('multi-key: first key windows render', twoOut.text.includes('88% left') && twoOut.text.includes('94% left'), twoOut.text.slice(0, 500))
   check('multi-key: second key windows render (own numbers)', twoOut.text.includes('92% left') && twoOut.text.includes('95% left'), twoOut.text.slice(0, 500))
   const twoChip = twoContributions.find(c => c.area === 'statusBar.right')
   const twoChipOut = render(twoChip.render)
   check('multi-key: chip follows the key in use, not the benched first key',
         twoChipOut.text.includes('6/5/8%') && !twoChipOut.text.includes('12/47/6%'), twoChipOut.text)
-  check('multi-key: chip names the key in use', twoChipOut.text.includes('secondary'), twoChipOut.text)
+  check('multi-key: chip shows the position of the key in use', twoChipOut.text.includes('(2/2)'), twoChipOut.text)
+  check('multi-key: chip does not repeat a configured credential name',
+        !twoChipOut.text.includes('secondary') && !twoChipOut.text.includes('OPENCODE_GO_API_KEY'), twoChipOut.text)
   const twoHooks = [render(twoPage.render).hooks, render(twoPage.render).hooks]
   check('multi-key: hook count stable across renders', new Set(twoHooks).size === 1, JSON.stringify(twoHooks))
 
@@ -1463,11 +1471,87 @@ async function testOpencodeUsage() {
   restoreTimers()
   // The inflate resolves on its own schedule, so render until the text lands
   // rather than guessing a turn count (same reason the models probe uses this).
-  const gzOut = await waitForText(gzContributions.find(c => c.area === 'routes').render, /secondary/)
+  const gzOut = await waitForText(gzContributions.find(c => c.area === 'routes').render, /Key 2/)
   const gzChip = await waitForText(gzContributions.find(c => c.area === 'statusBar.right').render, /6\/5\/8%/)
   check('gzip usage payload inflates and renders both keys',
-        gzOut.text.includes('OPENCODE_GO_API_KEY') && gzOut.text.includes('secondary'), gzOut.text.slice(0, 300))
+        gzOut.text.includes('Key 1') && gzOut.text.includes('Key 2'), gzOut.text.slice(0, 300))
   check('gzip usage payload: chip still follows the key in use', gzChip.text.includes('6/5/8%'), gzChip.text)
+
+  // Settings: the panel writes through applySettings(), so a change must persist
+  // AND redirect the chip immediately. Its own module instance (fresh: 8) keeps
+  // the mutated settings atoms from leaking into the cases above.
+  const setWrites = []
+  const setMod = (await loadPlugin('opencode-usage', { fresh: 8, scriptsDir: '/tmp/hdp-test/scripts' })).mod
+  const { ctx: setCtx, contributions: setContributions } = captureCtx()
+  setCtx.storage = {
+    get: (k, f) => (typeof f === 'undefined' ? null : f),
+    set: (k, v) => { setWrites.push([k, v]) },
+    remove: () => {}
+  }
+  sdk.setRpc(async (method, params) => {
+    if (method === 'shell.exec') {
+      const cmd = String(params && params.command || '')
+      if (cmd.includes('opencode_go_models.py')) return { stdout: packPayload(modelsPayload), stderr: '', code: 0 }
+      if (cmd.includes('opencode_go_usage.py')) return { stdout: JSON.stringify(twoKeySnap), stderr: '', code: 0 }
+    }
+    return {}
+  })
+  stubTimers()
+  setMod.register(setCtx)
+  restoreTimers()
+  await settle()
+  const setPage = setContributions.find(c => c.area === 'routes')
+  const setChip = setContributions.find(c => c.area === 'statusBar.right')
+  const setOut = render(setPage.render)
+  const optIds = opts => (Array.isArray(opts) ? opts : []).map(o => String(o && o.id != null ? o.id : o))
+  // Find a control by the thing that identifies it, not by tree order.
+  const segBy = want => setOut.prims.find(p => p.name === 'SegmentedControl' && optIds(p.props.options).join(',') === want)
+  const chipSeg = setOut.prims.find(p => p.name === 'SegmentedControl' && optIds(p.props.options).includes('combined'))
+  const refreshSeg = segBy('30,60,300')
+  const amberSeg = segBy('60,75,85')
+  const swBy = (out, label) => out.prims.find(p => p.name === 'Switch' && p.props['aria-label'] === label)
+  const labelSw = swBy(setOut, 'Show the key position on the chip')
+  const namesSw = swBy(setOut, 'Show credential names from the gateway config')
+  check('settings: the panel renders', setOut.text.includes('Settings') && setOut.text.includes('Chip shows'), setOut.text.slice(0, 300))
+  check('settings: every control is present and bound',
+        Boolean(chipSeg && refreshSeg && amberSeg && labelSw && namesSw),
+        [chipSeg, refreshSeg, amberSeg, labelSw, namesSw].map(Boolean).join(','))
+  check('settings: the chip source offers the keys and combined',
+        Boolean(chipSeg) && optIds(chipSeg.props.options).join(',') === 'auto,combined,key:1,key:2',
+        chipSeg && optIds(chipSeg.props.options).join(','))
+  check('settings: credential names are hidden by default', !setOut.text.includes('OPENCODE_GO_API_KEY'), setOut.text.slice(0, 300))
+
+  // A specific key: the chip reports that key and its position.
+  chipSeg.props.onChange('key:1')
+  const chipKey1 = render(setChip.render)
+  check('settings: choosing a key redirects the chip to it',
+        chipKey1.text.includes('12/47/6%') && chipKey1.text.includes('(1/2)'), chipKey1.text)
+
+  // Combined: the mean of every key, so the pool reads as one number.
+  chipSeg.props.onChange('combined')
+  const chipAll = render(setChip.render)
+  check('settings: combined chip source averages the pool',
+        chipAll.text.includes('9/26/7%') && chipAll.text.includes('(all)'), chipAll.text)
+
+  // Re-render between controls: each control's handler closes over the settings
+  // it was rendered with, so a stale prim would revert the earlier change.
+  const labelSw2 = swBy(render(setPage.render), 'Show the key position on the chip')
+  labelSw2.props.onCheckedChange(false)
+  const chipNoMark = render(setChip.render)
+  check('settings: the chip position marker can be turned off', !chipNoMark.text.includes('(all)') && !chipNoMark.text.includes('(2/2)'), chipNoMark.text)
+
+  const namesSw2 = swBy(render(setPage.render), 'Show credential names from the gateway config')
+  namesSw2.props.onCheckedChange(true)
+  const named = render(setPage.render)
+  check('settings: credential names can be revealed',
+        named.text.includes('OPENCODE_GO_API_KEY') && named.text.includes('secondary'), named.text.slice(0, 300))
+
+  // The plugin also caches its python command under its own storage key, so look
+  // only at the settings writes.
+  const setSettingsWrites = setWrites.filter(w => w[0] === 'settings_v1')
+  check('settings: every change is persisted under one key',
+        setSettingsWrites.length >= 4 && setSettingsWrites[setSettingsWrites.length - 1][1].showRawNames === true,
+        JSON.stringify(setWrites.map(w => [w[0], w[1] && w[1].chipSource, w[1] && w[1].chipLabel, w[1] && w[1].showRawNames])))
 
   Date.now = realNow
 }
