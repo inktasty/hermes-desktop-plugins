@@ -3,7 +3,9 @@
 
 Reports EVERY OpenCode Go key it can find, so an account with more than one
 credential (a credential pool with a second key) shows each key's own quota
-instead of only whichever key happens to be first.
+instead of only whichever key happens to be first -- and says which of them the
+gateway is believed to be serving, so the status-bar chip does not report a
+benched top-priority key's capped-out numbers as if they were the live account's.
 
 Keys are discovered from two places, in this order:
 
@@ -26,9 +28,10 @@ Payload shape:
       "fetched_at": "...",
       "source": "https://opencode.ai/zen/go/v1/usage",
       "plan": "OpenCode Go",
-      "keys": [ {"index","label","priority","source","pool_status","ok",
-                 "error","windows": {...}}, ... ],
-      "windows": {...},   # the first key that returned data (older callers/chips)
+      "keys": [ {"index","label","priority","source","pool_status","active",
+                 "benched","benched_until","ok","error","windows": {...}}, ... ],
+      "windows": {...},   # the key in use, else the first key with data; older
+                          # callers and the status-bar chip read this one
       "error": null
     }
 
@@ -60,6 +63,14 @@ POOL_PROVIDER = "opencode-go"
 POOL_PROVIDER_COMPACT = "opencodego"
 PRIMARY_ENV = "OPENCODE_GO_API_KEY"
 ENV_SIBLING_LIMIT = 9
+# Pool statuses/reasons meaning "not serving right now": the gateway benched this
+# key after a failure. Anything else (None, 'ok', ...) counts as usable. Status
+# values are matched loosely (lowercased) so a renamed one still reads.
+BENCHED_STATUSES = {
+    "exhausted", "invalid", "disabled", "revoked", "failed", "error",
+    "unauthorized", "forbidden", "rate_limited", "quota_exceeded",
+}
+BENCHED_REASONS = {"rate_limit", "quota", "quota_exceeded", "auth", "unauthorized", "invalid"}
 # opencode.ai answers 403 to a default python-urllib user agent; identify.
 USER_AGENT = "hermes-desktop-plugin/1.0 (+https://hermes-agent.nousresearch.com)"
 
@@ -184,6 +195,10 @@ def collect_entries() -> list:
             "priority": entry.get("priority"),
             "source": entry.get("source"),
             "pool_status": entry.get("last_status"),
+            "failure_reason": entry.get("failure_reason"),
+            "last_error_code": entry.get("last_error_code"),
+            "last_error_reset_at": entry.get("last_error_reset_at"),
+            "request_count": entry.get("request_count"),
             "key": key,
         })
     for name in env_key_names():
@@ -197,6 +212,10 @@ def collect_entries() -> list:
             "priority": None,
             "source": "env:" + name,
             "pool_status": None,
+            "failure_reason": None,
+            "last_error_code": None,
+            "last_error_reset_at": None,
+            "request_count": None,
             "key": key,
         })
     rows.sort(key=lambda r: (
@@ -222,8 +241,35 @@ def parse_iso(value):
     return parsed.astimezone(dt.timezone.utc)
 
 
+def parse_moment(value):
+    """A timestamp as the pool writes it: a unix epoch number, else an ISO
+    string. None when neither parses."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return dt.datetime.fromtimestamp(float(value), dt.timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    return parse_iso(value)
+
+
 def iso(value: dt.datetime) -> str:
     return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def bench_info(row: dict, now: dt.datetime):
+    """(benched, until) for one pool row. A benched key is not the one serving
+    traffic; once its cooldown has elapsed the gateway may pick it again, so it
+    stops counting as benched."""
+    status = str(row.get("pool_status") or "").strip().lower()
+    reason = str(row.get("failure_reason") or "").strip().lower()
+    if status not in BENCHED_STATUSES and reason not in BENCHED_REASONS:
+        return False, None
+    until = parse_moment(row.get("last_error_reset_at"))
+    if until is not None:
+        return (False, until) if until <= now else (True, until)
+    return True, None
 
 
 def window_start(resets_at: dt.datetime, key: str):
@@ -342,15 +388,35 @@ def main() -> int:
         emit({"ok": False, "error": "no OpenCode Go key found (checked the credential pool and .env)"})
         return 0
 
+    # Which key is serving? The highest-priority row the gateway has not benched:
+    # that is where the next request goes. If every row is benched, the first one
+    # still leads the fallback chain, so name it rather than inventing an answer.
+    active_at = len(rows) - 1
+    for position, row in enumerate(rows):
+        benched, _until = bench_info(row, now)
+        if not benched:
+            active_at = position
+            break
+
     keys_out = []
-    for row in rows:
+    for position, row in enumerate(rows):
+        benched, until = bench_info(row, now)
         base = {
             "index": row["index"],
             "label": row["label"],
             "priority": row["priority"],
             "source": row["source"],
             "pool_status": row["pool_status"],
+            "active": position == active_at,
+            "benched": benched,
+            "benched_until": iso(until) if until else None,
         }
+        if row.get("failure_reason") is not None:
+            base["failure_reason"] = row["failure_reason"]
+        if row.get("last_error_code") is not None:
+            base["last_error_code"] = row["last_error_code"]
+        if row.get("request_count") is not None:
+            base["request_count"] = row["request_count"]
         if not row["key"]:
             keys_out.append(dict(base, ok=False, error="no key readable for this pool entry", windows={}))
             continue
@@ -362,11 +428,17 @@ def main() -> int:
                 entry_out["status"] = status
         keys_out.append(entry_out)
 
+    # `windows` is what the status-bar chip reads. Point it at the key in use
+    # (else the first key that returned data) so a benched top-priority key can
+    # never make the chip report numbers nobody is spending.
     primary = {}
-    for entry in keys_out:
-        if entry.get("windows"):
-            primary = entry["windows"]
-            break
+    if 0 <= active_at < len(keys_out) and keys_out[active_at].get("windows"):
+        primary = keys_out[active_at]["windows"]
+    else:
+        for entry in keys_out:
+            if entry.get("windows"):
+                primary = entry["windows"]
+                break
 
     emit({
         "ok": bool(primary),
@@ -377,8 +449,10 @@ def main() -> int:
         "windows": primary,
         "error": None if primary else "usage endpoint returned no windows",
     })
-    heartbeat("%s ok %s" % (
+    active_label = keys_out[active_at]["label"] if 0 <= active_at < len(keys_out) else "?"
+    heartbeat("%s ok active=%s %s" % (
         iso(now),
+        active_label,
         " ".join("%s=[%s]" % (k["label"], ",".join(
             "%s:%s" % (w, (k["windows"].get(w) or {}).get("used_percent"))
             for w in ("rolling", "weekly", "monthly"))) for k in keys_out) or "no-windows",

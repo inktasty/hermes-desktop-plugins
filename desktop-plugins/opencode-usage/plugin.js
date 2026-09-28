@@ -1027,10 +1027,10 @@ export function ModelsTable({ models, error, initialControls }) {
 function KeyBlock({ k, now }) {
   const wins = windowList({ windows: k.windows })
   const failed = k.ok === false || wins.length === 0
-  // The pool benched this key at some point (e.g. 'exhausted'): worth saying,
-  // because the windows below may then read 'rate-limited' while the key is
-  // simply not the one serving traffic.
+  // The pool benched this key after a failure (e.g. 'exhausted'): the badge says
+  // so, and its cooldown end is worth carrying in the tooltip.
   const poolNote = k.pool_status && k.pool_status !== 'ok' ? String(k.pool_status) : null
+  const poolTitle = poolNote ? poolNote + (k.benched_until ? ' until ' + k.benched_until : '') : undefined
   const source = k.source ? String(k.source) : null
   return jsxs('div', {
     className: 'flex flex-col gap-3',
@@ -1038,16 +1038,19 @@ function KeyBlock({ k, now }) {
       jsxs('div', {
         className: 'flex flex-wrap items-center gap-2',
         children: [
-          jsx(StatusDot, { tone: failed ? 'bad' : 'good' }),
+          jsx(StatusDot, { tone: failed ? 'bad' : k.benched ? 'warn' : 'good' }),
           jsx('span', {
             className: 'text-[0.75rem] font-medium text-foreground',
             children: k.label || 'key'
           }),
+          k.active && !k.benched
+            ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: 'in use' })
+            : null,
           source
             ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-quaternary)', children: source })
             : null,
           poolNote
-            ? jsx(Badge, { variant: 'warn', size: 'xs', children: poolNote })
+            ? jsx(Badge, { variant: 'warn', size: 'xs', title: poolTitle, children: poolNote })
             : null
         ]
       }),
@@ -1208,22 +1211,43 @@ function UsageChip() {
   const loading = useValue($loading)
   const now = useValue($now)
 
-  const windows = windowList(snap)
+  // Follow the key the gateway is believed to be serving, not simply the first
+  // one: a benched top-priority key would otherwise report its capped-out
+  // numbers here as if they were what the account is spending right now. Falls
+  // back to the first key (then to the payload's own windows) when the gateway
+  // gives no active marker, so a single-key install reads as it always did.
+  const keys = snap && Array.isArray(snap.keys) ? snap.keys : null
+  const activeKey = keys && keys.length ? keys.find(k => k && k.active) || keys[0] : null
+  const own = activeKey ? windowList({ windows: activeKey.windows }) : []
+  const windows = own.length ? own : windowList(snap)
+
   const worst = windows.reduce((acc, w) => Math.max(acc, w.used_percent || 0), 0)
   const text = windows.length
     ? windows.map(w => (w.used_percent == null ? '--' : Math.round(w.used_percent))).join('/') + '%'
     : loading
       ? '...'
       : '--'
+  // With more than one key the chip names the one it is reporting, so the
+  // status bar says which credential those numbers belong to.
+  const label = keys && keys.length > 1 && activeKey && activeKey.label ? String(activeKey.label) : null
+  const shortLabel = label && label.length > 18 ? label.slice(0, 17) + '…' : label
 
-  const tip = windows.length
-    ? windows.map(w => {
-        const at = parseMs(w.resets_at)
-        return w.label + ' ' + w.used_percent + '% · resets in ' + (at == null ? '--' : fmtCountdown(at - now))
-      }).join('  |  ') + '   (click for the full page)'
-    : error
-      ? 'OpenCode Go usage unavailable: ' + error
-      : 'OpenCode Go usage — click to open'
+  const tip = keys && keys.length > 1
+    ? keys.map(k => {
+        const ks = windowList({ windows: k.windows })
+        const pcts = ks.length
+          ? ks.map(w => (w.used_percent == null ? '--' : Math.round(w.used_percent))).join('/') + '%'
+          : 'no data'
+        return (k.active ? 'in use' : k.benched ? 'benched' : 'standby') + ': ' + (k.label || 'key') + ' ' + pcts
+      }).join('   |   ') + '   (click for the full page)'
+    : windows.length
+      ? windows.map(w => {
+          const at = parseMs(w.resets_at)
+          return w.label + ' ' + w.used_percent + '% · resets in ' + (at == null ? '--' : fmtCountdown(at - now))
+        }).join('  |  ') + '   (click for the full page)'
+      : error
+        ? 'OpenCode Go usage unavailable: ' + error
+        : 'OpenCode Go usage — click to open'
 
   const chip = jsxs('button', {
     className: cn(
@@ -1240,6 +1264,9 @@ function UsageChip() {
     children: [
       jsx(StatusDot, { tone: windows.length ? toneOf(worst) : 'muted' }),
       jsx('span', { children: 'Go' }),
+      shortLabel
+        ? jsx('span', { className: 'text-(--ui-text-quaternary)', children: shortLabel })
+        : null,
       jsx('span', { className: 'text-(--ui-text-quaternary)', children: text })
     ]
   })

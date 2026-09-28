@@ -1368,10 +1368,12 @@ async function testOpencodeUsage() {
     keys: [
       {
         index: 0, label: 'OPENCODE_GO_API_KEY', priority: 0,
-        source: 'env:OPENCODE_GO_API_KEY', pool_status: 'exhausted', ok: true, windows: base.windows
+        source: 'env:OPENCODE_GO_API_KEY', pool_status: 'exhausted', ok: true,
+        active: false, benched: true, benched_until: '2026-10-13T08:40:23Z', windows: base.windows
       },
       {
         index: 1, label: 'secondary', priority: 1, source: 'manual', pool_status: null, ok: true,
+        active: true, benched: false, benched_until: null,
         windows: {
           rolling: { ...base.windows.rolling, used_percent: 6, remaining_percent: 94 },
           weekly: { ...base.windows.weekly, used_percent: 5, remaining_percent: 95 },
@@ -1399,11 +1401,16 @@ async function testOpencodeUsage() {
   check('multi-key: page renders without error', !twoOut.err, twoOut.err && twoOut.err.message)
   check('multi-key: both key labels render', twoOut.text.includes('OPENCODE_GO_API_KEY') && twoOut.text.includes('secondary'), twoOut.text.slice(0, 300))
   check('multi-key: the benched key is labelled', twoOut.text.includes('exhausted'), twoOut.text.slice(0, 300))
+  check('multi-key: the key in use is marked, the benched one is not',
+        twoOut.text.includes('in use') && !twoOut.text.includes('OPENCODE_GO_API_KEY in use'),
+        twoOut.text.slice(0, 400))
   check('multi-key: first key windows render', twoOut.text.includes('88% left') && twoOut.text.includes('94% left'), twoOut.text.slice(0, 500))
   check('multi-key: second key windows render (own numbers)', twoOut.text.includes('92% left') && twoOut.text.includes('95% left'), twoOut.text.slice(0, 500))
   const twoChip = twoContributions.find(c => c.area === 'statusBar.right')
   const twoChipOut = render(twoChip.render)
-  check('multi-key: chip still reads the primary key', twoChipOut.text.includes('12/47/6%'), twoChipOut.text)
+  check('multi-key: chip follows the key in use, not the benched first key',
+        twoChipOut.text.includes('6/5/8%') && !twoChipOut.text.includes('12/47/6%'), twoChipOut.text)
+  check('multi-key: chip names the key in use', twoChipOut.text.includes('secondary'), twoChipOut.text)
   const twoHooks = [render(twoPage.render).hooks, render(twoPage.render).hooks]
   check('multi-key: hook count stable across renders', new Set(twoHooks).size === 1, JSON.stringify(twoHooks))
 
@@ -1433,6 +1440,34 @@ async function testOpencodeUsage() {
   const oneOut = render(oneContributions.find(c => c.area === 'routes').render)
   check('one-key: no per-key header appears', !oneOut.text.includes('OPENCODE_GO_API_KEY'), oneOut.text.slice(0, 300))
   check('one-key: the plain window grid still renders', oneOut.text.includes('88% left') && oneOut.text.includes('94% left'), oneOut.text.slice(0, 300))
+
+  // The usage payload now grows with the number of keys (two keys already use
+  // ~3.4 KB of the gateway's 4 KB stdout tail), so it can ship gzipped like the
+  // models payload. Force the envelope and prove it inflates.
+  const gzEnvelope = obj => JSON.stringify({
+    ok: true,
+    gzip: gzipSync(Buffer.from(JSON.stringify(obj))).toString('base64')
+  })
+  const gzMod = (await loadPlugin('opencode-usage', { fresh: 7, scriptsDir: '/tmp/hdp-test/scripts' })).mod
+  const { ctx: gzCtx, contributions: gzContributions } = captureCtx()
+  sdk.setRpc(async (method, params) => {
+    if (method === 'shell.exec') {
+      const cmd = String(params && params.command || '')
+      if (cmd.includes('opencode_go_models.py')) return { stdout: packPayload(modelsPayload), stderr: '', code: 0 }
+      if (cmd.includes('opencode_go_usage.py')) return { stdout: gzEnvelope(twoKeySnap), stderr: '', code: 0 }
+    }
+    return {}
+  })
+  stubTimers()
+  gzMod.register(gzCtx)
+  restoreTimers()
+  // The inflate resolves on its own schedule, so render until the text lands
+  // rather than guessing a turn count (same reason the models probe uses this).
+  const gzOut = await waitForText(gzContributions.find(c => c.area === 'routes').render, /secondary/)
+  const gzChip = await waitForText(gzContributions.find(c => c.area === 'statusBar.right').render, /6\/5\/8%/)
+  check('gzip usage payload inflates and renders both keys',
+        gzOut.text.includes('OPENCODE_GO_API_KEY') && gzOut.text.includes('secondary'), gzOut.text.slice(0, 300))
+  check('gzip usage payload: chip still follows the key in use', gzChip.text.includes('6/5/8%'), gzChip.text)
 
   Date.now = realNow
 }
