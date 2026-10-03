@@ -142,8 +142,7 @@ const $settings = atom({ ...DEFAULT_SETTINGS })
 // that belongs in a status line. The real label stays available in a tooltip (and
 // behind the 'show credential names' setting) so a report is still actionable.
 function displayName(k, position) {
-  const n = k && typeof k.ordinal === 'number' ? k.ordinal : position || 1
-  return 'Key ' + n
+  return 'Key ' + keyId(k, position)
 }
 
 function sanitizeSettings(raw) {
@@ -1167,9 +1166,28 @@ export function ModelsTable({ models, error, initialControls }) {
   })
 }
 
+// ---- folded keys -----------------------------------------------------------
+// A folded key is one the user has opened: a Set would be nicer, but the payload
+// is rebuilt on every poll and the flag has to survive that, so it lives in an
+// atom keyed by display position rather than in component state.
+const $unfoldedKeys = atom({})
+
+// The stable identity of a key row: its position, from the gateway's ordinal when
+// there is one and from where it sits in the list when there is not.
+function keyId(k, position) {
+  return String(k && typeof k.ordinal === 'number' ? k.ordinal : position || 1)
+}
+
 // One credential's own block: its name (and where it comes from) plus its own
 // three quota windows. The gateway returns one of these per key in the pool, so
 // a two-key account shows both limits instead of only the highest-priority one.
+//
+// A pool-benched key is the folded one: the pool has stopped serving it
+// ('exhausted', 'invalid', ...), so its capped-out windows are the least
+// interesting thing on the page. The block opens as one line with a chevron and
+// the windows sit behind it. Folding is DERIVED from the pool verdict, never
+// latched, so a key that comes back into service expands on its own; only the
+// user's unfold is stored.
 function KeyBlock({ k, now, settings, position }) {
   const wins = windowList({ windows: k.windows })
   const failed = k.ok === false || wins.length === 0
@@ -1182,41 +1200,73 @@ function KeyBlock({ k, now, settings, position }) {
   const raw = k.label ? String(k.label) : null
   const source = k.source ? String(k.source) : null
   const showRaw = Boolean(settings && settings.showRawNames)
+  const unfolded = useValue($unfoldedKeys)
+  const id = keyId(k, position)
+  const foldable = Boolean(k.benched)
+  const open = !foldable || unfolded[id] === true
+  // Shown only while folded, so a folded key still says what it spent instead of
+  // hiding every number on the page.
+  const used = wins.length
+    ? wins.map(w => (w.used_percent == null ? '--' : String(Math.round(w.used_percent)))).join('/') + '%'
+    : null
+
+  const head = [
+    foldable ? jsx(Codicon, { name: open ? 'chevron-down' : 'chevron-right' }) : null,
+    jsx(StatusDot, { tone: failed ? 'bad' : k.benched ? 'warn' : 'good' }),
+    jsx('span', {
+      className: 'text-[0.75rem] font-medium text-foreground',
+      children: displayName(k, position)
+    }),
+    k.active && !k.benched
+      ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: 'in use' })
+      : null,
+    !open && used
+      ? jsx('span', {
+          className: 'text-[0.6875rem] text-(--ui-text-quaternary)',
+          title: 'Share of each window used: 5-hour / weekly / monthly',
+          children: used
+        })
+      : null,
+    showRaw && raw
+      ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-quaternary)', children: raw })
+      : null,
+    showRaw && source
+      ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-quaternary)', children: source })
+      : null,
+    poolNote
+      ? jsx(Badge, { variant: 'warn', size: 'xs', title: poolTitle || undefined, children: poolNote })
+      : null
+  ]
+
   return jsxs('div', {
     className: 'flex flex-col gap-3',
     children: [
-      jsxs('div', {
-        className: 'flex flex-wrap items-center gap-2',
-        title: [raw, source, poolTitle].filter(Boolean).join(' · ') || undefined,
-        children: [
-          jsx(StatusDot, { tone: failed ? 'bad' : k.benched ? 'warn' : 'good' }),
-          jsx('span', {
-            className: 'text-[0.75rem] font-medium text-foreground',
-            children: displayName(k, position)
+      foldable
+        ? jsx(Button, {
+            variant: 'ghost',
+            size: 'xs',
+            className: 'self-start',
+            'aria-expanded': open,
+            title: [raw, source, poolTitle, open ? 'fold this key' : 'unfold this key'].filter(Boolean).join(' · ') || undefined,
+            onClick: () => $unfoldedKeys.set({ ...$unfoldedKeys.get(), [id]: !open }),
+            children: jsx('span', { className: 'flex flex-wrap items-center gap-2', children: head })
+          })
+        : jsxs('div', {
+            className: 'flex flex-wrap items-center gap-2',
+            title: [raw, source, poolTitle].filter(Boolean).join(' · ') || undefined,
+            children: head
           }),
-          k.active && !k.benched
-            ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-tertiary)', children: 'in use' })
-            : null,
-          showRaw && raw
-            ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-quaternary)', children: raw })
-            : null,
-          showRaw && source
-            ? jsx('span', { className: 'text-[0.6875rem] text-(--ui-text-quaternary)', children: source })
-            : null,
-          poolNote
-            ? jsx(Badge, { variant: 'warn', size: 'xs', title: poolTitle || undefined, children: poolNote })
-            : null
-        ]
-      }),
-      failed
-        ? jsx('div', {
-            className: 'text-[0.6875rem] text-(--ui-red)',
-            children: k.error || 'no usage data for this key'
-          })
-        : jsx('div', {
-            className: 'grid gap-6 sm:grid-cols-3',
-            children: wins.map((win, index) => jsx(WindowColumn, { key: win.key, win, now, first: index === 0 }))
-          })
+      open
+        ? (failed
+            ? jsx('div', {
+                className: 'text-[0.6875rem] text-(--ui-red)',
+                children: k.error || 'no usage data for this key'
+              })
+            : jsx('div', {
+                className: 'grid gap-6 sm:grid-cols-3',
+                children: wins.map((win, index) => jsx(WindowColumn, { key: win.key, win, now, first: index === 0 }))
+              }))
+        : null
     ]
   })
 }

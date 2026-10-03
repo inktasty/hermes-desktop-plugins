@@ -1507,7 +1507,29 @@ async function testOpencodeUsage() {
         !twoOut.text.includes('OPENCODE_GO_API_KEY') && !twoOut.text.includes('secondary'), twoOut.text.slice(0, 300))
   check('multi-key: the benched key is labelled', twoOut.text.includes('exhausted'), twoOut.text.slice(0, 300))
   check('multi-key: the key in use is marked', twoOut.text.includes('in use'), twoOut.text.slice(0, 400))
-  check('multi-key: first key windows render', twoOut.text.includes('88% left') && twoOut.text.includes('94% left'), twoOut.text.slice(0, 500))
+  // A pool-benched key is not the one serving, so its block starts FOLDED: one
+  // line, a chevron, its badge, and its own used-share. The windows sit behind
+  // the unfold, and driving the control is what proves the fold is reversible
+  // rather than a key that silently vanished. 88% and 53% are the benched key's
+  // own remainders, so their absence is that key's windows being folded away.
+  check('multi-key: the benched key starts folded',
+        !twoOut.text.includes('88% left') && !twoOut.text.includes('53% left'), twoOut.text.slice(0, 500))
+  check('multi-key: a folded key still reports its own spend',
+        twoOut.text.includes('12/47/6%'), twoOut.text.slice(0, 400))
+  const foldBtn = primOf(twoOut, 'Button').find(b => b.props['aria-expanded'] === false)
+  check('multi-key: the fold control reports itself collapsed', Boolean(foldBtn), twoOut.text.slice(0, 400))
+  if (foldBtn && typeof foldBtn.props.onClick === 'function') foldBtn.props.onClick()
+  const twoOpenOut = render(twoPage.render)
+  check('multi-key: unfolding the benched key reveals its windows',
+        twoOpenOut.text.includes('88% left') && twoOpenOut.text.includes('53% left'), twoOpenOut.text.slice(0, 500))
+  check('multi-key: an unfolded key drops the folded summary', !twoOpenOut.text.includes('12/47/6%'), twoOpenOut.text.slice(0, 400))
+  const foldBack = primOf(twoOpenOut, 'Button').find(b => b.props['aria-expanded'] === true)
+  check('multi-key: the control flips to expanded', Boolean(foldBack), twoOpenOut.text.slice(0, 400))
+  // Fold it back: the stub SDK shares one boolean across every render, so leaving
+  // it unfolded would leak into the cases below.
+  if (foldBack && typeof foldBack.props.onClick === 'function') foldBack.props.onClick()
+  check('multi-key: folding again hides the windows',
+        !render(twoPage.render).text.includes('88% left'), render(twoPage.render).text.slice(0, 500))
   check('multi-key: second key windows render (own numbers)', twoOut.text.includes('92% left') && twoOut.text.includes('95% left'), twoOut.text.slice(0, 500))
   const twoChip = twoContributions.find(c => c.area === 'statusBar.right')
   const twoChipOut = render(twoChip.render)
