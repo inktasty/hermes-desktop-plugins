@@ -1607,7 +1607,11 @@ export default {
   name: 'OpenCode Go Usage',
   register(ctx) {
     pluginCtx = ctx
-    async function runScript(scriptName) {
+    // One interpreter probe, shared by every call: try each candidate until one
+    // exits 0, then hand back its stdout. The winner is cached, so the probe costs
+    // nothing after the first success. `args` are internal literals ('--part', '0'),
+    // never user text.
+    async function execScript(scriptName, args) {
       if (SCRIPTS_DIR.startsWith('__HERMES')) {
         throw new Error('run install.sh on the gateway')
       }
@@ -1617,6 +1621,7 @@ export default {
       let lastError = null
       let sawOutput = false
       const scriptPath = SCRIPTS_DIR + '/' + scriptName
+      const suffix = args && args.length ? args.map(a => ' ' + a).join('') : ''
       for (const py of candidates) {
         try {
           // A scripts dir containing a space (C:/Users/John Smith/...,
@@ -1625,18 +1630,16 @@ export default {
           // shellQuote picks the form the GATEWAY's shell needs, which is not
           // necessarily this platform's.
           const quotedPath = shellQuote(scriptPath)
-          const resp = await host.request('shell.exec', { command: py + ' ' + quotedPath })
+          const resp = await host.request('shell.exec', { command: py + ' ' + quotedPath + suffix })
           const stdout = resp && resp.stdout ? String(resp.stdout) : ''
           if (stdout) sawOutput = true
           const code = resp && typeof resp.code === 'number' ? resp.code : 0
           lastCode = code
-          const parsed = parseSnapshot(stdout)
-          if (code === 0 && parsed) {
-            const snap = await unwrap(parsed)
+          if (code === 0) {
             if (ctx.storage && typeof ctx.storage.set === 'function' && py !== cached) {
               ctx.storage.set('py_cmd', py)
             }
-            return snap
+            return { stdout: stdout, sawOutput: sawOutput }
           }
         } catch (e) {
           // fall through to next candidate, but keep the reason for the final error
@@ -1645,6 +1648,44 @@ export default {
       }
       const tried = (cached ? [cached] : PY_CANDIDATES).join(', ')
       throw new Error('no working python on the gateway shell (tried ' + tried + ')' + (lastCode != null ? '; exit ' + lastCode : '') + (lastError ? '; ' + (lastError.message || lastError) : '') + (sawOutput ? '; the script printed output this plugin could not parse (larger than the gateway reply limit?)' : '') + '; run install.sh on the gateway')
+    }
+
+    // shell.exec hands back only the LAST 4000 characters of stdout, so the script
+    // spools a payload that does not fit and reports {"spool":{"parts":N}}; read the
+    // N slices and join them. They are base64, so nothing trims or reflows between
+    // the slices and the join is exact. Returns the gzip envelope, ready for unwrap().
+    async function readSpool(scriptName, descriptor) {
+      const parts = Number(descriptor.spool && descriptor.spool.parts)
+      if (!Number.isFinite(parts) || parts < 1 || parts > 32) {
+        throw new Error('the gateway script reported ' + parts + ' payload parts, which is not a count this plugin trusts')
+      }
+      let text = ''
+      for (let i = 0; i < parts; i += 1) {
+        const res = await execScript(scriptName, ['--part', String(i)])
+        text += res.stdout
+      }
+      let envelope = null
+      try {
+        envelope = JSON.parse(text.trim())
+      } catch {
+        envelope = null
+      }
+      if (!envelope || typeof envelope !== 'object') {
+        throw new Error('the gateway script sent ' + parts + ' payload part(s) that did not join into JSON')
+      }
+      return envelope
+    }
+
+    async function runScript(scriptName) {
+      const res = await execScript(scriptName, [])
+      const parsed = parseSnapshot(res.stdout)
+      if (!parsed) {
+        throw new Error('the gateway script printed no JSON: output this plugin could not parse' + (res.sawOutput ? ' (larger than the gateway reply limit?)' : '') + '; run install.sh on the gateway')
+      }
+      if (parsed.spool && typeof parsed.spool === 'object') {
+        return await unwrap(await readSpool(scriptName, parsed))
+      }
+      return await unwrap(parsed)
     }
 
     // Settings: hydrate from storage (sanitised), and hand the settings UI a way

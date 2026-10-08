@@ -24,6 +24,7 @@ import io
 import json
 import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -47,6 +48,11 @@ USER_AGENT = "hermes-desktop-plugin/1.0 (+https://hermes-agent.nousresearch.com)
 STDOUT_PLAIN_LIMIT = 3500
 # Absolute ceiling for one stdout line; past this the gateway truncates it.
 STDOUT_HARD_LIMIT = 3900
+# A payload that not even the gzipped form fits in one stdout is spooled to this
+# file and read back in slices of SPOOL_PART_CHARS through `--part N` calls. The
+# slices are base64 (no whitespace, no newline), so joining them is exact.
+SPOOL_PART_CHARS = 3500
+SPOOL_FILE = HERMES_HOME / "cache" / "opencode_go_models.spool"
 
 # Caps and offers OpenCode announces on X but has not put in the docs yet. Keep
 # these short and always carry the source URL, so the table can say where a
@@ -666,14 +672,45 @@ def sort_models(records):
     return sorted(records, key=key)
 
 
+def write_spool(text):
+    """Park a payload that does not fit in one stdout, and say how many slices it is.
+
+    shell.exec hands the renderer only the LAST 4000 characters of stdout, so the
+    gzipped form is the fallback; when even that is too long the text goes here and
+    the plugin reads it back with `--part 0`, `--part 1`, ... . Returns the slice
+    count, or None when the file cannot be written (the caller then says so instead
+    of printing a payload that would arrive truncated).
+    """
+    try:
+        SPOOL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SPOOL_FILE.write_text(text, encoding="utf-8")
+    except OSError:
+        return None
+    return (len(text) + SPOOL_PART_CHARS - 1) // SPOOL_PART_CHARS
+
+
+def print_part(index):
+    """Print slice `index` of the spooled payload: no newline, no decoration."""
+    try:
+        text = SPOOL_FILE.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(json.dumps({"ok": False, "error": "no spooled payload: %s" % exc}, separators=(",", ":")))
+        return 1
+    start = index * SPOOL_PART_CHARS
+    sys.stdout.write(text[start:start + SPOOL_PART_CHARS])
+    return 0
+
+
 def emit(payload):
     """One line of JSON on stdout, small enough to survive the gateway.
 
     `shell.exec` hands the renderer only the LAST 4000 characters of stdout
-    (tui_gateway/methods_tools.py), and the full catalog is ~13 KB, so a large
+    (tui_gateway/methods_tools.py), and the full catalog is ~24 KB, so a large
     payload travels gzipped and base64-encoded as {"ok":...,"gzip":"..."} and the
-    plugin inflates it. Small payloads stay plain JSON, which keeps the script
-    usable straight from a terminal.
+    plugin inflates it. Past STDOUT_HARD_LIMIT even that is too long: the text is
+    spooled to disk and announced as {"ok":...,"spool":{"parts":N}}, which the plugin
+    joins from N `--part` calls. Small payloads stay plain JSON, which keeps the
+    script usable straight from a terminal.
     """
     line = json.dumps(payload, separators=(",", ":"))
     if len(line) <= STDOUT_PLAIN_LIMIT:
@@ -685,9 +722,15 @@ def emit(payload):
         fh.write(line.encode("utf-8"))
     packed = base64.b64encode(buf.getvalue()).decode("ascii")
     out = json.dumps({"ok": payload.get("ok"), "gzip": packed}, separators=(",", ":"))
-    if len(out) > STDOUT_HARD_LIMIT:
+    if len(out) <= STDOUT_HARD_LIMIT:
+        return out
+    parts = write_spool(out)
+    if not parts:
         return json.dumps({"ok": False, "error": "payload too large to ship"}, separators=(",", ":"))
-    return out
+    return json.dumps(
+        {"ok": payload.get("ok"), "spool": {"parts": parts, "bytes": len(out)}},
+        separators=(",", ":"),
+    )
 
 
 def main():
@@ -783,6 +826,10 @@ def main():
 
 if __name__ == "__main__":
     try:
+        # `--part N` reads back a spooled payload (see emit) and never touches the
+        # network, so it must not go through main().
+        if len(sys.argv) > 2 and sys.argv[1] == "--part":
+            sys.exit(print_part(int(sys.argv[2])))
         main()
     except Exception as exc:   # a traceback leaves the plugin with no JSON at all
         print(json.dumps({"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}))

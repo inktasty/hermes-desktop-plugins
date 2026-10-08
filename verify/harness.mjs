@@ -1756,10 +1756,68 @@ async function proveOracle() {
   check('oracle FAILS the conditional-hook component', new Set(bad).size === 2, JSON.stringify(bad))
 }
 
+// ---- spool transport: a payload too big even gzipped ------------------------
+// scripts/opencode_go_models.py spools anything past the gateway's stdout budget
+// and reports {"spool":{"parts":N}}; the plugin reads the N slices back and joins
+// them. The fixture slices are generated here, never captured from an account.
+async function testSpoolTransport() {
+  console.log('--- opencode-usage spool transport')
+  const envelope = JSON.stringify({
+    ok: true,
+    gzip: gzipSync(Buffer.from(JSON.stringify(makeModelsPayload(Date.now())))).toString('base64')
+  })
+  const PARTS = 2
+  // Two slices that straddle the 3500-char boundary the script uses, so a plugin
+  // that dropped or reordered one would fail to parse rather than pass by luck.
+  const partOf = i => envelope.slice(i * 3500, (i + 1) * 3500)
+  const snap = makeSnapshot(Date.now())
+
+  async function renderWithDescriptor(descriptor, fresh) {
+    const mod = (await loadPlugin('opencode-usage', { fresh: fresh, scriptsDir: '/tmp/hdp-test/scripts' })).mod
+    const { ctx, contributions } = captureCtx()
+    const calls = []
+    sdk.setRpc(async (method, params) => {
+      if (method === 'shell.exec') {
+        const cmd = String(params && params.command || '')
+        calls.push(cmd)
+        if (cmd.includes('opencode_go_models.py')) {
+          const m = cmd.match(/--part (\d+)$/)
+          if (m) return { stdout: partOf(Number(m[1])), stderr: '', code: 0 }
+          return { stdout: descriptor + '\n', stderr: '', code: 0 }
+        }
+        if (cmd.includes('opencode_go_usage.py')) return { stdout: JSON.stringify(snap), stderr: '', code: 0 }
+      }
+      return {}
+    })
+    stubTimers()
+    mod.register(ctx)
+    restoreTimers()
+    const refreshPalette = contributions.find(c => c.area === 'palette' && c.data.id === 'opencodeGo.refresh')
+    await refreshPalette.data.run()
+    await settle(20)
+    const page = contributions.find(c => c.area === 'routes')
+    return { page: page, calls: calls }
+  }
+
+  const good = await renderWithDescriptor(JSON.stringify({ ok: true, spool: { parts: PARTS, bytes: envelope.length } }), 98)
+  const goodOut = await waitForText(good.page.render, /Promo Model/)
+  check('spool: the joined payload reaches the table', /Promo Model/.test(goodOut.text), goodOut.text.slice(0, 300))
+  check('spool: no payload-too-large failure', !/payload too large|Model list unavailable/.test(goodOut.text), goodOut.text.slice(0, 300))
+  const partCalls = good.calls.filter(c => /--part \d+$/.test(c))
+  check('spool: each part is read once, in order', partCalls.length === PARTS && partCalls[0].endsWith('--part 0') && partCalls[1].endsWith('--part 1'), JSON.stringify(partCalls))
+
+  // An untrusted part count must fail loudly instead of looping against the gateway.
+  const bad = await renderWithDescriptor(JSON.stringify({ ok: true, spool: { parts: 99, bytes: 1 } }), 99)
+  const badOut = await waitForText(bad.page.render, /not a count this plugin trusts/)
+  check('spool: an implausible part count is refused', /not a count this plugin trusts/.test(badOut.text), badOut.text.slice(0, 300))
+  check('spool: the refused count reads no parts', bad.calls.filter(c => /--part \d+$/.test(c)).length === 0, JSON.stringify(bad.calls))
+}
+
 // ---------------------------------------------------------------------------
 await testDeepseekRate()
 await testSessionUsage()
 await testOpencodeUsage()
+await testSpoolTransport()
 await proveOracle()
 
 console.log('\n' + passes + ' passed, ' + fails + ' failed')
