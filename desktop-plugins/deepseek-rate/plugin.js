@@ -214,9 +214,10 @@ function RateChip() {
 
   return jsx(Tip, {
     label,
-    children: jsxs('button', {
+    // A status readout, not a control: a non-interactive element, so it is not a
+    // tab stop and does not read as a dead button to assistive tech.
+    children: jsxs('span', {
       className: 'inline-flex h-full cursor-default items-center gap-1.5 px-1.5 text-[0.6875rem]',
-      type: 'button',
       children: [
         jsx('span', { className: 'text-(--ui-text-quaternary)', children: 'DeepSeek' }),
         jsx(Badge, {

@@ -100,6 +100,10 @@ export function shellQuote(p, windows = GATEWAY_WINDOWS) {
 const CONSOLE_URL = 'https://opencode.ai/workspace'
 const WINDOW_ORDER = ['rolling', 'weekly', 'monthly']
 
+// Standard remediation appended to a gateway-call failure, so the panel says what
+// to check and where the log is instead of only echoing the raw RPC error.
+const FAILURE_HINT = ' — check OPENCODE_GO_API_KEY (and OPENCODE_GO_BASE_URL) in the gateway .env, confirm the script path baked into this plugin exists on the gateway, then see the app log (Windows: %LOCALAPPDATA%\\hermes\\logs\\desktop.log; macOS/Linux: ~/.hermes/logs/desktop.log).'
+
 // Table placeholders. Every '—' carries a title saying what is missing, so a dash
 // is never a dead end.
 const DASH = '—'
@@ -145,7 +149,7 @@ function displayName(k, position) {
   return 'Key ' + keyId(k, position)
 }
 
-function sanitizeSettings(raw) {
+export function sanitizeSettings(raw) {
   const out = { ...DEFAULT_SETTINGS }
   if (raw && typeof raw === 'object') {
     for (const field of Object.keys(DEFAULT_SETTINGS)) {
@@ -168,7 +172,7 @@ function sanitizeSettings(raw) {
 // chip can say what the whole pool is spending. Mean-used and mean-projected stay
 // consistent with each other because every key shares the same window boundaries
 // and elapsed time; the reset shown is the soonest, i.e. when capacity returns.
-function combinedWindows(keys) {
+export function combinedWindows(keys) {
   const out = {}
   for (const key of WINDOW_ORDER) {
     const rows = (keys || []).map(k => (k && k.windows ? k.windows[key] : null)).filter(Boolean)
@@ -196,7 +200,7 @@ function combinedWindows(keys) {
 }
 
 // Which windows the chip reports, and the marker that says where they came from.
-function chipSelection(keys, settings) {
+export function chipSelection(keys, settings) {
   const list = Array.isArray(keys) ? keys : []
   if (!list.length) return { windows: [], marker: null }
   if (list.length === 1) return { windows: windowList({ windows: list[0].windows }), marker: null }
@@ -1552,7 +1556,7 @@ function UsageChip() {
 
   const tip = keys && keys.length > 1
     ? (picked.marker === 'all'
-        ? ['combined pool: ' + (windows.length
+        ? ['combined pool (mean of the keys): ' + (windows.length
             ? windows.map(w => (w.used_percent == null ? '--' : Math.round(w.used_percent))).join('/') + '%'
             : 'no data')]
         : []
@@ -1621,7 +1625,13 @@ export default {
       let lastError = null
       let sawOutput = false
       const scriptPath = SCRIPTS_DIR + '/' + scriptName
-      const suffix = args && args.length ? args.map(a => ' ' + a).join('') : ''
+      const suffix = args && args.length ? args.map(a => {
+        // Only internal literals reach here ('--part', '0'), but refuse anything
+        // else rather than splice an unexpected token into the gateway command.
+        const s = String(a)
+        if (!/^[\w-]+$/.test(s)) throw new Error('refusing an unexpected script argument: ' + s)
+        return ' ' + s
+      }).join('') : ''
       for (const py of candidates) {
         try {
           // A scripts dir containing a space (C:/Users/John Smith/...,
@@ -1728,7 +1738,7 @@ export default {
         $updatedAt.set(Date.now())
         $error.set(null)
       } catch (e) {
-        $error.set('Gateway call failed: ' + (e && e.message ? e.message : String(e)))
+        $error.set('Gateway call failed: ' + (e && e.message ? e.message : String(e)) + FAILURE_HINT)
       } finally {
         $loading.set(false)
       }
@@ -1750,7 +1760,7 @@ export default {
           ctx.storage.set('models_v2', payload)
         }
       } catch (e) {
-        $modelsError.set('Gateway call failed: ' + (e && e.message ? e.message : String(e)))
+        $modelsError.set('Gateway call failed: ' + (e && e.message ? e.message : String(e)) + FAILURE_HINT)
       } finally {
         $modelsLoading.set(false)
       }

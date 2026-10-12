@@ -589,6 +589,37 @@ async function testSessionUsage() {
   check('shell quote: session-usage cmd.exe form', suNs.shellQuote('C:/x y/a.py', true) === '"C:/x y/a.py"', suNs.shellQuote('C:/x y/a.py', true))
   check('shell quote: session-usage takes the gateway form for a non-path value', suNs.shellQuote('C:/x y/a.py') === "'C:/x y/a.py'", suNs.shellQuote('C:/x y/a.py'))
 
+  // mergeUsage: a monotonic-max merge, so an out-of-order live frame can never
+  // clobber newer polled counters; cache-hit ratio is the latest value, not a max.
+  const mergedBack = suNs.mergeUsage(
+    { input: 100, output: 20, total: 120, calls: 5, cache_hit_pct: 80 },
+    { input: 50, output: 10, total: 60, calls: 2, cache_hit_pct: 60 }
+  )
+  check('mergeUsage keeps the larger counter from an out-of-order live frame',
+    mergedBack.input === 100 && mergedBack.output === 20 && mergedBack.total === 120 && mergedBack.calls === 5,
+    JSON.stringify(mergedBack))
+  check('mergeUsage takes the latest cache-hit ratio, not the max', mergedBack.cache_hit_pct === 60, String(mergedBack.cache_hit_pct))
+  const mergedFwd = suNs.mergeUsage({ input: 100 }, { input: 150, cache_hit_pct: 40 })
+  check('mergeUsage takes a newer, larger live counter', mergedFwd.input === 150, JSON.stringify(mergedFwd))
+
+  // accumulate: a counter that went backwards is a gateway restart, so the sample
+  // re-baselines from zero and the first tokens after the reset are still charged.
+  const ratesCard = { input: 2, output: 1, cache_read: 1, provider: 'opencode-go', model: 'deepseek-v4.1-flash' }
+  const offPeakMs = Date.UTC(2026, 8, 16, 20, 0)
+  const resetPrev = { miss: 1000000, cacheRead: 0, output: 0, usd: 0.5 }
+  const resetNext = suNs.accumulate(resetPrev, { prompt: 1000, input: 1000, output: 0, cache_hit_pct: 0 }, ratesCard, offPeakMs, 'deepseek-v4.1-flash')
+  check('accumulate re-baselines a reset counter and still charges the new tokens',
+    resetNext && Math.abs(resetNext.usd - (0.5 + 1000 * 2 / 1000000)) < 1e-12,
+    resetNext && String(resetNext.usd))
+  // The normal forward sample charges only the delta (1000 new input tokens).
+  const fwdNext = suNs.accumulate({ miss: 2000, cacheRead: 0, output: 0, usd: 0 }, { prompt: 3000, input: 3000, output: 0, cache_hit_pct: 0 }, ratesCard, offPeakMs, 'deepseek-v4.1-flash')
+  check('accumulate prices only the delta on a forward sample',
+    fwdNext && Math.abs(fwdNext.usd - 1000 * 2 / 1000000) < 1e-12, fwdNext && String(fwdNext.usd))
+  // A model switch: the loaded card is for a different model, so nothing is priced
+  // (rather than charging the new model's tokens to the old model's rates).
+  const mismatch = suNs.accumulate(null, { prompt: 1000, input: 1000, output: 0, cache_hit_pct: 0, model: 'other-model' }, ratesCard, offPeakMs, 'other-model')
+  check('accumulate refuses to price a sample whose model differs from the loaded card', mismatch === null, JSON.stringify(mismatch))
+
   // Composition for both platforms -- the whole command is what broke before, and a
   // pure helper check cannot see it. The model id is NOT a path, so it must take the
   // gateway's form, and it must arrive as one bare token: an id handed over already
@@ -1106,6 +1137,40 @@ async function testOpencodeUsage() {
   check('page freshness: the window is exactly 30 minutes',
     ns.pageStale(1e12 - 30 * 60000 - 1, 1e12) === true && ns.pageStale(1e12 - 30 * 60000 + 1, 1e12) === false,
     'at 30m-1ms and 30m+1ms')
+
+  // sanitizeSettings: a stored blob from an older build is coerced field by field,
+  // an unknown value falling back to the default rather than wedging a control.
+  const badSettings = ns.sanitizeSettings({ chipSource: 'bogus', refreshSec: 7, warnAt: 99, chipLabel: 0, showRawNames: 'yes' })
+  check('sanitizeSettings drops an unknown chip source', badSettings.chipSource === 'auto', badSettings.chipSource)
+  check('sanitizeSettings drops a refresh/warn value not among the choices', badSettings.refreshSec === 60 && badSettings.warnAt === 60, JSON.stringify(badSettings))
+  check('sanitizeSettings coerces the two booleans strictly', badSettings.chipLabel === true && badSettings.showRawNames === false, JSON.stringify(badSettings))
+  const nullSettings = ns.sanitizeSettings(null)
+  check('sanitizeSettings(null) yields the defaults', nullSettings.chipSource === 'auto' && nullSettings.refreshSec === 60 && nullSettings.warnAt === 60, JSON.stringify(nullSettings))
+  check('sanitizeSettings keeps a valid key:N source', ns.sanitizeSettings({ chipSource: 'key:3' }).chipSource === 'key:3', ns.sanitizeSettings({ chipSource: 'key:3' }).chipSource)
+
+  // combinedWindows: the mean of every key that reports a window, with the
+  // soonest reset standing for capacity-return time.
+  const isoA = '2026-09-16T22:00:00Z'
+  const isoB = '2026-09-16T20:00:00Z'
+  const combKeys = [
+    { windows: { rolling: { used_percent: 10, elapsed_percent: 50, resets_at: isoA } } },
+    { windows: { rolling: { used_percent: 30, elapsed_percent: 50, resets_at: isoB } } }
+  ]
+  const comb = ns.combinedWindows(combKeys)[0]
+  check('combinedWindows averages the window across keys', comb && comb.used_percent === 20 && comb.combined_keys === 2, comb && JSON.stringify(comb))
+  check('combinedWindows reports the soonest reset', comb && comb.resets_at === new Date(Date.parse(isoB)).toISOString(), comb && comb.resets_at)
+
+  // chipSelection: the source marker, and every fallback when the settings name a
+  // key that is not present.
+  const selKeys = [
+    { ordinal: 1, active: false, windows: { rolling: { used_percent: 1 }, weekly: { used_percent: 2 }, monthly: { used_percent: 3 } } },
+    { ordinal: 2, active: true, windows: { rolling: { used_percent: 4 }, weekly: { used_percent: 5 }, monthly: { used_percent: 6 } } }
+  ]
+  check('chipSelection names a specific key', ns.chipSelection(selKeys, { chipSource: 'key:1' }).marker === '1/2', JSON.stringify(ns.chipSelection(selKeys, { chipSource: 'key:1' })))
+  check('chipSelection falls back to the key in use for an unknown key:N', ns.chipSelection(selKeys, { chipSource: 'key:9' }).marker === '2/2', JSON.stringify(ns.chipSelection(selKeys, { chipSource: 'key:9' })))
+  check('chipSelection marks the combined pool "all"', ns.chipSelection(selKeys, { chipSource: 'combined' }).marker === 'all', JSON.stringify(ns.chipSelection(selKeys, { chipSource: 'combined' })))
+  check('chipSelection returns nothing for an empty key list', (() => { const s = ns.chipSelection([], {}); return s.windows.length === 0 && s.marker === null })())
+  check('chipSelection has no position marker for a single key', ns.chipSelection([selKeys[0]], {}).marker === null)
 
   // The quoting follows the GATEWAY's shell, which is not necessarily this platform's:
   // POSIX sh needs single quotes (double quotes would still expand a literal $ or

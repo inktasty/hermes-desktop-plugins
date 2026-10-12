@@ -16,7 +16,7 @@
  * Pairs with the nous-balance plugin (credits), kept deliberately separate.
  */
 
-import { atom, cn, host, Popover, PopoverContent, PopoverTrigger, useValue } from '@hermes/plugin-sdk'
+import { atom, cn, host, Popover, PopoverContent, PopoverTrigger, STATUSBAR_AREAS, useValue } from '@hermes/plugin-sdk'
 import { useEffect, useState } from 'react'
 import { jsx } from 'react/jsx-runtime'
 
@@ -206,16 +206,25 @@ function accumulate(prev, u, rates, nowMs, sessionModel) {
   // be priced (and must never render as a row of dashed rates): price only a
   // payload that carries both numbers.
   if (!Number.isFinite(rates.input) || !Number.isFinite(rates.output)) return prev || null
+  // Price only against the card for THIS model. A model switch between the rates
+  // fetch and this sample must not charge the new model's tokens to the old
+  // model's rates; the price script echoes the requested model, so equal ids is
+  // the normal case, and a mismatch skips the update instead of mispricing it.
+  if (rates.model && sessionModel && String(rates.model) !== String(sessionModel)) return prev || null
   const peak = peakApplies(rates.model, rates.provider)
     && isDeepSeekModel(sessionModel || rates.model)
     && isPeakNow(nowMs)
   const card = rateCard(rates, peak)
   const now = tokensOf(u)
   const base = prev || { miss: 0, cacheRead: 0, output: 0, usd: 0 }
+  // A counter that went backwards is a gateway restart, not negative spend:
+  // re-baseline that counter from zero so the first tokens after the reset are
+  // still charged, instead of being silently dropped by Math.max(0, ...).
+  const delta = (nowV, baseV) => (nowV >= (baseV || 0) ? nowV - (baseV || 0) : nowV)
   const deltaUsd = costOf(
-    Math.max(0, now.miss - (base.miss || 0)),
-    Math.max(0, now.cacheRead - (base.cacheRead || 0)),
-    Math.max(0, now.output - (base.output || 0)),
+    delta(now.miss, base.miss),
+    delta(now.cacheRead, base.cacheRead),
+    delta(now.output, base.output),
     card
   )
   const usd = (base.usd || 0) + deltaUsd
@@ -407,7 +416,7 @@ function costNote(key, text) {
   return jsx('div', { key, className: 'pt-0.5 text-[10px] text-(--ui-text-quaternary)', children: text })
 }
 
-export { SessionPanel }
+export { SessionPanel, accumulate, mergeUsage }
 
 export default {
   id: ID, // must match the folder name
@@ -569,6 +578,10 @@ export default {
               type: 'button',
               onMouseEnter: () => setOpen(true),
               onMouseLeave: () => setOpen(false),
+              // Keyboard/touch users have no hover: focus opens the panel and
+              // blur closes it, so the same readout is reachable without a mouse.
+              onFocus: () => setOpen(true),
+              onBlur: () => setOpen(false),
               onClick: () => {
                 fetchOnce()
               },
@@ -588,7 +601,7 @@ export default {
 
     ctx.register({
       id: 'chip',
-      area: 'statusBar.right',
+      area: STATUSBAR_AREAS.right,
       order: 20,
       render: () => jsx(SessionChip, {})
     })
