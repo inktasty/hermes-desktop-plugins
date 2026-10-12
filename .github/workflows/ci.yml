@@ -1,0 +1,47 @@
+name: CI
+
+# The harness and the class audit ARE this repo's review (there is no other gate).
+# The README asks for the harness under at least two TZs: a date that looks right
+# in one zone often lands a day early in another, so the tooltip/date assertions
+# are only meaningful across zones.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tz: ['UTC', 'America/Los_Angeles', 'Australia/Sydney']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Harness (TZ=${{ matrix.tz }})
+        working-directory: verify
+        env:
+          TZ: ${{ matrix.tz }}
+          PLUGIN_SRC: ../desktop-plugins
+        run: node harness.mjs
+      # class-audit needs the app's own sources (Tailwind scans only those), which
+      # are not present here. It prints one line and exits 0 in that lenient case;
+      # run it --strict only where DESKTOP_SRC points at a real app source tree.
+      - name: Class audit (TZ=${{ matrix.tz }})
+        working-directory: verify
+        env:
+          TZ: ${{ matrix.tz }}
+        run: node class-audit.mjs
+
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Stdlib unittest for gateway-scripts
+        run: python3 -m unittest discover -s gateway-scripts/tests -v

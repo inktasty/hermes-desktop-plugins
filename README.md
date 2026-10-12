@@ -148,6 +148,21 @@ setting for it: the flag is read from the gateway process's environment, so
 Without the flag the row is labeled "Session cost (est.)" and shows the estimate
 described above, which works on every provider.
 
+## Uninstall
+
+`uninstall.sh` is the inverse of `install.sh`: it removes the three plugin folders
+from the app's `desktop-plugins/` directory and the three scripts from the
+gateway's `scripts/` directory. It writes no config and touches nothing else.
+
+```bash
+./uninstall.sh                      # app plugin folder defaults per-OS
+./uninstall.sh /path/to/desktop-plugins
+HERMES_HOME=/opt/hermes ./uninstall.sh
+```
+
+Remove only the app-side plugin folder and the gateway scripts it installed; a
+chip disappears after **Reload desktop plugins** from the command palette.
+
 ## Verify before trusting it
 
 `verify/` is an offline harness: stub `@hermes/plugin-sdk` and React modules,
@@ -182,8 +197,9 @@ the shape is what keeps them cheap to load:
   to the plugin's `id`.
 - A row in the table at the top of this README saying what it adds.
 - An entry in `PLUGIN_IDS` in `install.sh` if it needs installing there.
-- A case in `verify/harness.mjs` that asserts what it must get right. CI does not
-  exist here yet, so the harness and the class audit are the review.
+- A case in `verify/harness.mjs` that asserts what it must get right. The harness
+  and the class audit are the review, and `.github/workflows/ci.yml` runs both
+  (the harness under three `TZ` values) plus the `gateway-scripts` unit tests.
 
 Two things that bite every new plugin, both learned the hard way:
 

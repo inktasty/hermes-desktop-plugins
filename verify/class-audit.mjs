@@ -14,10 +14,14 @@
  *
  * Usage:
  *   node verify/class-audit.mjs
+ *   node verify/class-audit.mjs --strict
  *   DESKTOP_SRC=/path/to/apps/desktop/src node verify/class-audit.mjs
  *
- * A machine that has no app source prints one line and exits 0: this is a guard,
- * and it must never be the reason a plugin repo cannot be checked elsewhere.
+ * A machine that has no app source prints one line and exits 0 in the default
+ * lenient mode: this is a guard, and it must never be the reason a plugin repo
+ * cannot be checked elsewhere. In CI, or with --strict (or when DESKTOP_SRC was
+ * set but points nowhere), a missing source is a hard failure instead, so the
+ * audit can never pass silently in a pipeline that expected it to run.
  *
  * No dependencies beyond node:fs / node:path.
  */
@@ -157,9 +161,13 @@ function loadAllowlist() {
 // ---- run ---------------------------------------------------------------------
 
 function main() {
+  const strict = process.argv.includes('--strict') || process.env.CLASS_AUDIT_STRICT === '1'
+  // An explicitly-set-but-absent DESKTOP_SRC is a configuration error, not the
+  // no-source-here case, and fails in either mode.
+  const srcWasSet = Boolean(process.env.DESKTOP_SRC)
   if (!existsSync(SRC) || !statSync(SRC).isDirectory()) {
     console.log(`class-audit: could not audit — no app source at ${SRC} (set DESKTOP_SRC to the app's src dir)`)
-    process.exit(0)
+    process.exit(strict || srcWasSet ? 1 : 0)
   }
 
   const haystack = walk(SRC, []).map(f => readFileSync(f, 'utf8')).join('\n')
