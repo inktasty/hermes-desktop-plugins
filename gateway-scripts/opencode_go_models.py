@@ -71,6 +71,9 @@ ANNOUNCEMENTS = [
         "note": "Free for one week",
         "source": "https://x.com/opencode/status/2102145730999730611",
         "date": "2026-09-21",
+        # The post says "Free for one week", dated 2026-09-21: past this the offer
+        # has lapsed, so the row is dropped rather than rendered as if current.
+        "expires": "2026-09-28",
     },
 ]
 
@@ -573,14 +576,28 @@ def parse_privacy(markdown):
     return rows, notes
 
 
-def announcement_for(model_id):
+def announcement_for(model_id, today=None):
+    """The announcement for a model, unless it has lapsed.
+
+    An entry may carry `expires` (a bare YYYY-MM-DD): once that day has passed the
+    offer is over, so it is not returned and never renders as if still running.
+    """
+    today = today or dt.date.today()
     for item in ANNOUNCEMENTS:
-        if norm(item["match"]) == norm(model_id):
-            return item
+        if norm(item["match"]) != norm(model_id):
+            continue
+        expires = item.get("expires")
+        if expires:
+            try:
+                if today > dt.date.fromisoformat(expires):
+                    return None
+            except ValueError:
+                pass
+        return item
     return None
 
 
-def build_model(model_id, docs, catalog, privacy=None, notes=None, releases=None):
+def build_model(model_id, docs, catalog, privacy=None, notes=None, releases=None, today=None):
     entry = docs.get(norm(model_id))
     catalog_entry = catalog.get(model_id) or {}
     tier = default_tier(entry) if entry else {}
@@ -644,7 +661,7 @@ def build_model(model_id, docs, catalog, privacy=None, notes=None, releases=None
     else:
         record["privacy"] = None
 
-    announcement = announcement_for(model_id)
+    announcement = announcement_for(model_id, today)
     record["announcement"] = None
     if announcement:
         record["announcement"] = {
@@ -680,10 +697,16 @@ def write_spool(text):
     the plugin reads it back with `--part 0`, `--part 1`, ... . Returns the slice
     count, or None when the file cannot be written (the caller then says so instead
     of printing a payload that would arrive truncated).
+
+    Written to a sibling temp file and renamed into place, so a concurrent
+    `--part` read sees either the whole old payload or the whole new one, never a
+    torn mix of the two.
     """
     try:
         SPOOL_FILE.parent.mkdir(parents=True, exist_ok=True)
-        SPOOL_FILE.write_text(text, encoding="utf-8")
+        tmp = SPOOL_FILE.with_name(SPOOL_FILE.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, SPOOL_FILE)
     except OSError:
         return None
     return (len(text) + SPOOL_PART_CHARS - 1) // SPOOL_PART_CHARS
@@ -759,8 +782,9 @@ def main():
         served = sorted(catalog)
 
     releases = registry_index()
+    today = dt.datetime.now(dt.timezone.utc).date()
     records = [
-        build_model(model_id, docs, catalog, privacy, privacy_notes, releases)
+        build_model(model_id, docs, catalog, privacy, privacy_notes, releases, today)
         for model_id in served
     ]
     served_keys = set(norm(model_id) for model_id in served)

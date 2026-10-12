@@ -109,8 +109,12 @@ def heartbeat(line: str) -> None:
             if os.path.getsize(path) > 200_000:
                 with open(path, "r", encoding="utf-8", errors="replace") as fh:
                     keep = fh.readlines()[-200:]
-                with open(path, "w", encoding="utf-8") as fh:
+                # Replace atomically so a concurrent poll's append is never lost to
+                # a truncate-then-rewrite race (the temp lives in the same dir).
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
                     fh.writelines(keep)
+                os.replace(tmp, path)
         except OSError:
             pass
         # 0600: the line carries credential labels, so do not leave it world
