@@ -440,23 +440,44 @@ def emit(payload: dict) -> None:
 def main() -> int:
     now = dt.datetime.now(dt.timezone.utc)
     rows = collect_entries()
-    if not any(r["key"] for r in rows):
+    skipped_keys = [
+        {
+            "index": r["index"],
+            "label": r["label"],
+            "source": r["source"],
+            "reason": "no key readable for this pool entry",
+        }
+        for r in rows
+        if not r["key"]
+    ]
+    usable = [r for r in rows if r["key"]]
+    if not usable:
         heartbeat("%s no-key" % iso(now))
-        emit({"ok": False, "error": "no OpenCode Go key found (checked the credential pool and .env)"})
+        emit({
+            "ok": False,
+            "fetched_at": iso(now),
+            "source": USAGE_URL,
+            "plan": "OpenCode Go",
+            "keys": [],
+            "usable_keys": 0,
+            "skipped_keys": skipped_keys,
+            "windows": {},
+            "error": "no usable OpenCode Go key found (checked the credential pool and .env)",
+        })
         return 0
 
     # Which key is serving? The highest-priority row the gateway has not benched:
     # that is where the next request goes. If every row is benched, the first one
     # still leads the fallback chain, so name it rather than inventing an answer.
-    active_at = len(rows) - 1
-    for position, row in enumerate(rows):
+    active_at = len(usable) - 1
+    for position, row in enumerate(usable):
         benched, _until = bench_info(row, now)
         if not benched:
             active_at = position
             break
 
     keys_out = []
-    for position, row in enumerate(rows):
+    for position, row in enumerate(usable):
         benched, until = bench_info(row, now)
         base = {
             "index": row["index"],
@@ -475,9 +496,6 @@ def main() -> int:
             base["last_error_code"] = row["last_error_code"]
         if row.get("request_count") is not None:
             base["request_count"] = row["request_count"]
-        if not row["key"]:
-            keys_out.append(dict(base, ok=False, error="no key readable for this pool entry", windows={}))
-            continue
         ok, windows, error, status = probe(row["key"], now)
         entry_out = dict(base, ok=ok, windows=windows)
         if error:
@@ -504,6 +522,8 @@ def main() -> int:
         "source": USAGE_URL,
         "plan": "OpenCode Go",
         "keys": keys_out,
+        "usable_keys": len(keys_out),
+        "skipped_keys": skipped_keys,
         "windows": primary,
         "error": None if primary else "usage endpoint returned no windows",
     })

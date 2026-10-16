@@ -3,9 +3,11 @@
 
 Three sources, merged into ONE line of JSON on stdout:
 
-  1. GET {GO_BASE}/models          -- the models THIS key is served (the authoritative list)
-  2. https://opencode.ai/docs/go.md -- per-model prices, monthly caps, estimated request
-     counts, tier notes (peak/off-peak, >256K) and any promotion labels
+  1. GET {GO_BASE}/models          -- the models THIS key is served (the authoritative list),
+     from the console's documented endpoint (https://opencode.ai/inference/go/v1/models)
+  2. https://opencode.ai/v2/docs/console/go -- per-model prices, monthly caps, estimated
+     request counts, tier notes (peak/off-peak, >256K) and any promotion labels; fetched
+     as markdown through content negotiation (the old /docs/go.md path 404s)
   3. https://models.opencode.ai/api.json -- the live catalog, used to cross-check (2)'s
      prices and to price models (2) has not listed yet. Cached on disk with a 12h TTL and
      ETag revalidation; falls back to the stale cache, then to the models.dev registry
@@ -20,6 +22,7 @@ Stdlib only. Usage:  python3 opencode_go_models.py
 import base64
 import datetime as dt
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -35,9 +38,20 @@ ENV_FILE = HERMES_HOME / ".env"
 CATALOG_CACHE = HERMES_HOME / "cache" / "opencode_go_catalog.json"
 REGISTRY_CACHE = HERMES_HOME / "models_dev_cache.json"
 
-DEFAULT_GO_BASE = "https://opencode.ai/zen/go/v1"
-DOCS_URL = "https://opencode.ai/docs/go"
-DOCS_MD = "https://opencode.ai/docs/go.md"
+# The console's own models endpoint, as documented at
+# https://opencode.ai/v2/docs/console/go ("Fetch the full list of available models and
+# their metadata from the models endpoint"). Deliberately NOT read from
+# OPENCODE_GO_BASE_URL: that variable is the RUNTIME provider's base URL -- Hermes reads
+# it for chat traffic -- so inheriting it would leave this table on the legacy path, and
+# moving the table would relocate live chat traffic as a side effect.
+DEFAULT_GO_BASE = "https://opencode.ai/inference/go/v1"
+# Plugin-only override, for aiming the table at a mirror without touching the runtime.
+BASE_ENV = "OPENCODE_GO_MODELS_BASE_URL"
+# The docs page, read as markdown through content negotiation (see fetch_docs): the
+# legacy /docs/go.md path answers 404 as of 2026-10-16, and the page still serves its
+# source markdown to a client that asks for text/markdown.
+DOCS_URL = "https://opencode.ai/v2/docs/console/go"
+DOCS_ACCEPT = "text/markdown, text/plain;q=0.9, */*;q=0.8"
 CATALOG_URL = "https://models.opencode.ai/api.json"
 CATALOG_TTL_S = 12 * 3600
 HTTP_TIMEOUT = 25
@@ -48,11 +62,17 @@ USER_AGENT = "hermes-desktop-plugin/1.0 (+https://hermes-agent.nousresearch.com)
 STDOUT_PLAIN_LIMIT = 3500
 # Absolute ceiling for one stdout line; past this the gateway truncates it.
 STDOUT_HARD_LIMIT = 3900
-# A payload that not even the gzipped form fits in one stdout is spooled to this
-# file and read back in slices of SPOOL_PART_CHARS through `--part N` calls. The
-# slices are base64 (no whitespace, no newline), so joining them is exact.
+# A payload that not even the gzipped form fits in one stdout is spooled to a file
+# NAMED FOR A HASH OF ITS OWN BYTES and read back in slices of SPOOL_PART_CHARS
+# through `--part N --id <hex>` calls. The per-run name is what stops two runs in
+# the same window from splicing each other's slices; the slices are base64 (no
+# whitespace, no newline), so joining them is exact.
 SPOOL_PART_CHARS = 3500
-SPOOL_FILE = HERMES_HOME / "cache" / "opencode_go_models.spool"
+SPOOL_DIR = HERMES_HOME / "cache"
+SPOOL_PREFIX = "opencode_go_models."
+SPOOL_SUFFIX = ".spool"
+# A spool file older than this is litter from a crashed run; sweep it on write.
+SPOOL_TTL_S = 600
 
 # Caps and offers OpenCode announces on X but has not put in the docs yet. Keep
 # these short and always carry the source URL, so the table can say where a
@@ -71,9 +91,7 @@ ANNOUNCEMENTS = [
         "note": "Free for one week",
         "source": "https://x.com/opencode/status/2102145730999730611",
         "date": "2026-09-21",
-        # The post says "Free for one week", dated 2026-09-21: past this the offer
-        # has lapsed, so the row is dropped rather than rendered as if current.
-        "expires": "2026-09-28",
+        "ends": "2026-09-28",
     },
 ]
 
@@ -281,7 +299,7 @@ def promo_label(raw):
 
 def api_models():
     """[{id}] the key is served, plus the base URL it came from."""
-    base = (env_value("OPENCODE_GO_BASE_URL") or DEFAULT_GO_BASE).rstrip("/")
+    base = (env_value(BASE_ENV) or DEFAULT_GO_BASE).rstrip("/")
     key = gateway_key()
     if not key:
         return None, base, "no OpenCode Go key found (checked the credential pool and .env)"
@@ -350,7 +368,17 @@ def fetch_catalog():
         return slim, 0.0, None
     except urllib.error.HTTPError as exc:
         if exc.code == 304 and isinstance(cached, dict) and isinstance(cached.get("models"), dict):
-            return cached["models"], age, None
+            # 304: the payload is unchanged, so refresh the cache's OWN age stamp.
+            # Without this the on-disk fetched_at stays at the original fetch, the
+            # TTL check above always fails, and every run sends a conditional
+            # request that (correctly) answers 304 again, forever.
+            cached["fetched_at"] = time.time()
+            try:
+                CATALOG_CACHE.parent.mkdir(parents=True, exist_ok=True)
+                CATALOG_CACHE.write_text(json.dumps(cached), encoding="utf-8")
+            except OSError:
+                pass
+            return cached["models"], 0.0, None
         reason = "catalog request failed: HTTP " + str(exc.code)
     except (urllib.error.URLError, OSError, ValueError) as exc:
         reason = "catalog request failed: " + str(exc)
@@ -382,6 +410,18 @@ def registry_fallback():
 
 
 # ---------------------------------------------------------------- docs page ---
+
+def fetch_docs():
+    """The console docs page as markdown: the format every parser below reads.
+
+    Content negotiation, not a .md URL (the legacy DOCS_MD path 404s): the docs site
+    answers a request that asks for text/markdown with its source markdown. Raises
+    like http_get, so the caller records the failure and the table degrades to the
+    live catalog instead of going blank.
+    """
+    raw, _ = http_get(DOCS_URL, {"Accept": DOCS_ACCEPT})
+    return text_of(raw)
+
 
 def table_blocks(markdown):
     """Every markdown table in the page as [header_cells, *data_cells]."""
@@ -467,19 +507,108 @@ def alternate_tiers(entry):
     return [tier for tier in (entry.get("tiers") or []) if tier is not base and tier.get("variant")]
 
 
-def docs_promos(docs):
-    """Model-level promotions the docs label, e.g. '4x · Ends Sep 27'."""
+# A promo end date as the docs write it: "Ends Sep 27", "Ends Sep 27, 2026",
+# "through Oct 3". The month is a 3-letter abbreviation; the day is 1-2 digits;
+# the year is optional (absent => the next occurrence of that month/day, which
+# for a promo means the coming one, so a bare "Ends Sep 27" read in, say, late
+# September means THIS year's Sep 27, already past once the date rolls by).
+_PROMO_END_RE = re.compile(
+    r"\b(?:ends?|through|until|expires?)\s+"
+    r"([A-Za-z]{3,})\.?\s+(\d{1,2})(?:\s*,?\s*(\d{4}))?",
+    re.IGNORECASE,
+)
+_MONTHS = {
+    m: i + 1
+    for i, m in enumerate(
+        ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+    )
+}
+
+
+def promo_end_date(label, today=None):
+    """The calendar day a promo label says it ends, or None.
+
+    None means either no end date is stated ("limited time") or it is not a date
+    this parser recognises -- in both cases the promo is treated as still live
+    (a promo we cannot date is not assumed expired). A recognised date in the
+    past is what the caller drops.
+    """
+    match = _PROMO_END_RE.search(str(label or ""))
+    if not match:
+        return None
+    month = _MONTHS.get(match.group(1)[:3].lower())
+    if not month:
+        return None
+    day = int(match.group(2))
+    if not (1 <= day <= 31):
+        return None
+    today = today or dt.date.today()
+    if match.group(3):
+        # An explicit year is taken literally, valid or not.
+        try:
+            return dt.date(int(match.group(3)), month, day)
+        except ValueError:
+            return None
+    # A bare month/day: the candidate NEAREST today across year-1 .. year+4, so a
+    # date already past this year reads as past instead of rolling forward a full
+    # year. A Feb 29 promo read in 2026 is Feb 29 2028, not nothing -- skipping
+    # nonexistent dates keeps a datable promo datable.
+    cands = []
+    for year in range(today.year - 1, today.year + 5):
+        try:
+            cands.append(dt.date(year, month, day))
+        except ValueError:
+            pass
+    return min(cands, key=lambda d: abs((d - today).days)) if cands else None
+
+
+def _live_promo(label, today=None):
+    """The label if the promo is still live, else None.
+
+    One gate for every promo surface (the top-of-page list AND the per-model row
+    badge), so the two can never disagree: a promo whose stated end date has
+    passed is dropped, a label with no recognisable end date is kept (see
+    promo_end_date).
+    """
+    if not label:
+        return None
+    today = today or dt.date.today()
+    end = promo_end_date(label, today)
+    if end is not None and end < today:
+        return None
+    return label
+
+
+def docs_promos(docs, served_keys=None, today=None):
+    """Model-level promotions the docs label, e.g. '4x · Ends Sep 27'.
+
+    Two filters, both required by the UI contract:
+
+    * an expired promo (its stated end date is in the past) is dropped, so a
+      label the docs still carry -- or a cached copy of them -- never renders a
+      dead offer at the top of the page;
+    * a promo whose model is not in `served_keys` is dropped, so a promotion for
+      a model this key is not served never shows. `served_keys` is the
+      normalised set the API actually returned; when it is None (no key / no API
+      answer) the served filter is skipped and only the date filter applies.
+    """
+    today = today or dt.date.today()
+    served = set(served_keys) if served_keys is not None else None
     promos = []
     for key, entry in docs.items():
-        label = entry.get("promo")
+        label = _live_promo(entry.get("promo"), today)
         if not label:
             continue
+        end = promo_end_date(label, today)
+        if served is not None and norm(key) not in served:
+            continue  # not served to this key
         promos.append({
             "model_key": key,
             "name": entry.get("name") or key,
             "label": label,
             "monthly_usd": entry.get("monthly_usd"),
             "monthly_before_usd": entry.get("monthly_before_usd"),
+            "ends": end.isoformat() if end is not None else None,
         })
     return promos
 
@@ -576,28 +705,24 @@ def parse_privacy(markdown):
     return rows, notes
 
 
-def announcement_for(model_id, today=None):
-    """The announcement for a model, unless it has lapsed.
-
-    An entry may carry `expires` (a bare YYYY-MM-DD): once that day has passed the
-    offer is over, so it is not returned and never renders as if still running.
-    """
-    today = today or dt.date.today()
+def announcement_for(model_id):
     for item in ANNOUNCEMENTS:
         if norm(item["match"]) != norm(model_id):
             continue
-        expires = item.get("expires")
-        if expires:
+        # A time-boxed announcement carries an 'ends' calendar day: once it has
+        # passed, the item is skipped here, so a dead offer cannot render forever.
+        ends = item.get("ends")
+        if ends:
             try:
-                if today > dt.date.fromisoformat(expires):
-                    return None
+                if dt.date.fromisoformat(str(ends)) < dt.date.today():
+                    continue
             except ValueError:
                 pass
         return item
     return None
 
 
-def build_model(model_id, docs, catalog, privacy=None, notes=None, releases=None, today=None):
+def build_model(model_id, docs, catalog, privacy=None, notes=None, releases=None):
     entry = docs.get(norm(model_id))
     catalog_entry = catalog.get(model_id) or {}
     tier = default_tier(entry) if entry else {}
@@ -617,7 +742,11 @@ def build_model(model_id, docs, catalog, privacy=None, notes=None, releases=None
         # models.dev registry release date, null when the registry has none: the
         # key is always present so the payload shape stays stable.
         "released": release_for(model_id, releases or {}),
-        "promo": (entry or {}).get("promo"),
+        # The per-model badge carries the SAME expiry gate as the top-of-page
+        # promo list: a label whose end date has passed ships as None here, so a
+        # dead offer cannot survive as a row badge either. A label with no
+        # recognisable end date is still treated as live (see promo_end_date).
+        "promo": _live_promo((entry or {}).get("promo")),
         "in_docs": bool(entry),
         "price_source": "docs",
         "catalog": {
@@ -661,13 +790,14 @@ def build_model(model_id, docs, catalog, privacy=None, notes=None, releases=None
     else:
         record["privacy"] = None
 
-    announcement = announcement_for(model_id, today)
+    announcement = announcement_for(model_id)
     record["announcement"] = None
     if announcement:
         record["announcement"] = {
             "note": announcement["note"],
             "source": announcement["source"],
             "date": announcement["date"],
+            "ends": announcement.get("ends"),
             "cap_usd": announcement["cap_usd"],
         }
         if announcement["cap_usd"] is not None:
@@ -689,33 +819,50 @@ def sort_models(records):
     return sorted(records, key=key)
 
 
+def prune_spools():
+    """Drop spool files older than SPOOL_TTL_S so a crashed run leaves no litter."""
+    try:
+        cutoff = time.time() - SPOOL_TTL_S
+        for path in SPOOL_DIR.glob(SPOOL_PREFIX + "*" + SPOOL_SUFFIX):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 def write_spool(text):
     """Park a payload that does not fit in one stdout, and say how many slices it is.
 
     shell.exec hands the renderer only the LAST 4000 characters of stdout, so the
-    gzipped form is the fallback; when even that is too long the text goes here and
-    the plugin reads it back with `--part 0`, `--part 1`, ... . Returns the slice
-    count, or None when the file cannot be written (the caller then says so instead
-    of printing a payload that would arrive truncated).
-
-    Written to a sibling temp file and renamed into place, so a concurrent
-    `--part` read sees either the whole old payload or the whole new one, never a
-    torn mix of the two.
+    gzipped form is the fallback; when even that is too long the text goes to a file
+    NAMED FOR A HASH OF ITS OWN BYTES, and the plugin reads it back with
+    `--part N --id <hex>`. The per-run name is what keeps two concurrent runs from
+    overwriting each other's slices. Returns {"parts": N, "id": hex}, or None when
+    the file cannot be written (the caller then says so instead of printing a
+    payload that would arrive truncated).
     """
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
+    spool = SPOOL_DIR / (SPOOL_PREFIX + digest + SPOOL_SUFFIX)
     try:
-        SPOOL_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = SPOOL_FILE.with_name(SPOOL_FILE.name + ".tmp")
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, SPOOL_FILE)
+        spool.parent.mkdir(parents=True, exist_ok=True)
+        prune_spools()
+        spool.write_text(text, encoding="utf-8")
     except OSError:
         return None
-    return (len(text) + SPOOL_PART_CHARS - 1) // SPOOL_PART_CHARS
+    return {"parts": (len(text) + SPOOL_PART_CHARS - 1) // SPOOL_PART_CHARS, "id": digest}
 
 
-def print_part(index):
+def print_part(index, spool_id):
     """Print slice `index` of the spooled payload: no newline, no decoration."""
+    if not re.fullmatch(r"[0-9a-f]{16}", spool_id or ""):
+        print(json.dumps({"ok": False, "error": "bad spool id"}, separators=(",", ":")))
+        return 1
+    path = SPOOL_DIR / (SPOOL_PREFIX + spool_id + SPOOL_SUFFIX)
     try:
-        text = SPOOL_FILE.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
     except OSError as exc:
         print(json.dumps({"ok": False, "error": "no spooled payload: %s" % exc}, separators=(",", ":")))
         return 1
@@ -731,9 +878,9 @@ def emit(payload):
     (tui_gateway/methods_tools.py), and the full catalog is ~24 KB, so a large
     payload travels gzipped and base64-encoded as {"ok":...,"gzip":"..."} and the
     plugin inflates it. Past STDOUT_HARD_LIMIT even that is too long: the text is
-    spooled to disk and announced as {"ok":...,"spool":{"parts":N}}, which the plugin
-    joins from N `--part` calls. Small payloads stay plain JSON, which keeps the
-    script usable straight from a terminal.
+    spooled to a per-run file and announced as {"ok":...,"spool":{"parts":N,"id":hex}},
+    which the plugin joins from N `--part N --id <hex>` calls. Small payloads stay
+    plain JSON, which keeps the script usable straight from a terminal.
     """
     line = json.dumps(payload, separators=(",", ":"))
     if len(line) <= STDOUT_PLAIN_LIMIT:
@@ -747,11 +894,11 @@ def emit(payload):
     out = json.dumps({"ok": payload.get("ok"), "gzip": packed}, separators=(",", ":"))
     if len(out) <= STDOUT_HARD_LIMIT:
         return out
-    parts = write_spool(out)
-    if not parts:
+    spool = write_spool(out)
+    if not spool:
         return json.dumps({"ok": False, "error": "payload too large to ship"}, separators=(",", ":"))
     return json.dumps(
-        {"ok": payload.get("ok"), "spool": {"parts": parts, "bytes": len(out)}},
+        {"ok": payload.get("ok"), "spool": {"parts": spool["parts"], "id": spool["id"], "bytes": len(out)}},
         separators=(",", ":"),
     )
 
@@ -764,8 +911,7 @@ def main():
 
     markdown = ""
     try:
-        raw, _ = http_get(DOCS_MD)
-        markdown = text_of(raw)
+        markdown = fetch_docs()
     except (urllib.error.URLError, OSError) as exc:
         errors.append("docs page request failed: " + str(exc))
 
@@ -782,9 +928,8 @@ def main():
         served = sorted(catalog)
 
     releases = registry_index()
-    today = dt.datetime.now(dt.timezone.utc).date()
     records = [
-        build_model(model_id, docs, catalog, privacy, privacy_notes, releases, today)
+        build_model(model_id, docs, catalog, privacy, privacy_notes, releases)
         for model_id in served
     ]
     served_keys = set(norm(model_id) for model_id in served)
@@ -811,7 +956,7 @@ def main():
         "docs_url": DOCS_URL,
         "api_base": base,
         "plan": plan_info(markdown) if markdown else {},
-        "promos": docs_promos(docs),
+        "promos": docs_promos(docs, served_keys=served_keys),
         "counts": {
             "served": len(records),
             "with_caps": len([r for r in records if r.get("monthly_usd") is not None]),
@@ -826,6 +971,7 @@ def main():
                 "note": record["announcement"]["note"],
                 "source": record["announcement"]["source"],
                 "date": record["announcement"]["date"],
+                "ends": record["announcement"].get("ends"),
                 "cap_usd": record["announcement"]["cap_usd"],
             }
             for record in sort_models(records)
@@ -853,7 +999,8 @@ if __name__ == "__main__":
         # `--part N` reads back a spooled payload (see emit) and never touches the
         # network, so it must not go through main().
         if len(sys.argv) > 2 and sys.argv[1] == "--part":
-            sys.exit(print_part(int(sys.argv[2])))
+            spool_id = sys.argv[4] if len(sys.argv) > 4 and sys.argv[3] == "--id" else ""
+            sys.exit(print_part(int(sys.argv[2]), spool_id))
         main()
     except Exception as exc:   # a traceback leaves the plugin with no JSON at all
         print(json.dumps({"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}))

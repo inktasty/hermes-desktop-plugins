@@ -1661,17 +1661,24 @@ export default {
     }
 
     // shell.exec hands back only the LAST 4000 characters of stdout, so the script
-    // spools a payload that does not fit and reports {"spool":{"parts":N}}; read the
-    // N slices and join them. They are base64, so nothing trims or reflows between
-    // the slices and the join is exact. Returns the gzip envelope, ready for unwrap().
+    // spools a payload that does not fit and reports
+    // {"spool":{"parts":N,"id":"<hex>"}}; read the N slices and join them. They are
+    // base64, so nothing trims or reflows between the slices and the join is exact.
+    // The id names THAT run's spool file -- print_part() refuses a request without it
+    // -- so passing it is what stops two runs in the same window from splicing each
+    // other's slices. Returns the gzip envelope, ready for unwrap().
     async function readSpool(scriptName, descriptor) {
       const parts = Number(descriptor.spool && descriptor.spool.parts)
       if (!Number.isFinite(parts) || parts < 1 || parts > 32) {
         throw new Error('the gateway script reported ' + parts + ' payload parts, which is not a count this plugin trusts')
       }
+      const spoolId = String((descriptor.spool && descriptor.spool.id) || '')
+      if (!/^[0-9a-f]{16}$/.test(spoolId)) {
+        throw new Error('the gateway script reported a spooled payload with no usable id (' + (spoolId || 'missing') + '), so its slices cannot be read back')
+      }
       let text = ''
       for (let i = 0; i < parts; i += 1) {
-        const res = await execScript(scriptName, ['--part', String(i)])
+        const res = await execScript(scriptName, ['--part', String(i), '--id', spoolId])
         text += res.stdout
       }
       let envelope = null

@@ -217,29 +217,46 @@ class GatewayScriptTests(unittest.TestCase):
 
     def test_spool_write_and_read_parts(self):
         text = "x" * (self.models.SPOOL_PART_CHARS * 2 + 10)
-        parts = self.models.write_spool(text)
-        self.assertEqual(parts, 3)
-        self.assertFalse((self.home / "cache" / "opencode_go_models.spool.tmp").exists())
+        descriptor = self.models.write_spool(text)
+        # The name is a hash of the payload's own bytes, so two runs in one window
+        # cannot splice each other's slices; the descriptor carries it back to the
+        # reader instead of the reader guessing a fixed filename.
+        self.assertEqual(descriptor["parts"], 3)
+        spool = self.home / "cache" / ("opencode_go_models." + descriptor["id"] + ".spool")
+        self.assertTrue(spool.exists())
+        self.assertFalse(spool.with_name(spool.name + ".tmp").exists())
         joined = ""
-        for i in range(parts):
+        for i in range(descriptor["parts"]):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
-                rc = self.models.print_part(i)
+                rc = self.models.print_part(i, descriptor["id"])
             self.assertEqual(rc, 0)
             joined += buf.getvalue()
         self.assertEqual(joined, text)
+        # A slice request that does not name this run's spool is refused, not served.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = self.models.print_part(0, "0" * 16)
+        self.assertEqual(rc, 1)
+        self.assertIn("no spooled payload", buf.getvalue())
 
     # -- announcement expiry ----------------------------------------------
 
     def test_announcement_expiry(self):
         models = self.models
-        live_day = dt.date(2026, 9, 25)
-        lapsed_day = dt.date(2026, 10, 5)
-        self.assertIsNotNone(models.announcement_for("mimo-v2.6-flash", live_day))
-        self.assertIsNone(models.announcement_for("mimo-v2.6-flash", lapsed_day))
-        # No expiry on omen-alpha: it never lapses.
-        self.assertIsNotNone(models.announcement_for("omen-alpha", lapsed_day))
-        self.assertIsNone(models.announcement_for("does-not-exist", live_day))
+        today = dt.date.today()
+        # The gate reads the real clock, so assert the RULE against each entry's own
+        # end date rather than a fixed day: a dated announcement in the past must not
+        # render, and one without an end date never lapses.
+        for item in models.ANNOUNCEMENTS:
+            ends = item.get("ends")
+            got = models.announcement_for(item["match"])
+            if ends and dt.date.fromisoformat(str(ends)) < today:
+                self.assertIsNone(got, "%s lapsed on %s and must not render" % (item["match"], ends))
+            else:
+                self.assertIsNotNone(got, "%s carries no passed end date and must render" % item["match"])
+        self.assertIsNotNone(models.announcement_for("omen-alpha"))
+        self.assertIsNone(models.announcement_for("does-not-exist"))
 
 
 if __name__ == "__main__":

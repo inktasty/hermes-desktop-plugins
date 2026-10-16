@@ -1836,6 +1836,11 @@ async function testSpoolTransport() {
   // that dropped or reordered one would fail to parse rather than pass by luck.
   const partOf = i => envelope.slice(i * 3500, (i + 1) * 3500)
   const snap = makeSnapshot(Date.now())
+  // The script names each run's spool file for a hash of its own bytes and refuses a
+  // slice request that does not name it (print_part -> "bad spool id"), so the fixture
+  // carries an id and the stub answers ONLY the matching one: a plugin that drops it
+  // must fail here instead of looking fine until a payload outgrows the stdout budget.
+  const SPOOL_ID = 'a1b2c3d4e5f60718'
 
   async function renderWithDescriptor(descriptor, fresh) {
     const mod = (await loadPlugin('opencode-usage', { fresh: fresh, scriptsDir: '/tmp/hdp-test/scripts' })).mod
@@ -1846,8 +1851,11 @@ async function testSpoolTransport() {
         const cmd = String(params && params.command || '')
         calls.push(cmd)
         if (cmd.includes('opencode_go_models.py')) {
-          const m = cmd.match(/--part (\d+)$/)
-          if (m) return { stdout: partOf(Number(m[1])), stderr: '', code: 0 }
+          const m = cmd.match(/--part (\d+) --id ([0-9a-f]{16})$/)
+          if (m) {
+            if (m[2] !== SPOOL_ID) return { stdout: JSON.stringify({ ok: false, error: 'bad spool id' }) + '\n', stderr: '', code: 0 }
+            return { stdout: partOf(Number(m[1])), stderr: '', code: 0 }
+          }
           return { stdout: descriptor + '\n', stderr: '', code: 0 }
         }
         if (cmd.includes('opencode_go_usage.py')) return { stdout: JSON.stringify(snap), stderr: '', code: 0 }
@@ -1864,18 +1872,25 @@ async function testSpoolTransport() {
     return { page: page, calls: calls }
   }
 
-  const good = await renderWithDescriptor(JSON.stringify({ ok: true, spool: { parts: PARTS, bytes: envelope.length } }), 98)
+  const good = await renderWithDescriptor(JSON.stringify({ ok: true, spool: { parts: PARTS, bytes: envelope.length, id: SPOOL_ID } }), 98)
   const goodOut = await waitForText(good.page.render, /Promo Model/)
   check('spool: the joined payload reaches the table', /Promo Model/.test(goodOut.text), goodOut.text.slice(0, 300))
   check('spool: no payload-too-large failure', !/payload too large|Model list unavailable/.test(goodOut.text), goodOut.text.slice(0, 300))
-  const partCalls = good.calls.filter(c => /--part \d+$/.test(c))
-  check('spool: each part is read once, in order', partCalls.length === PARTS && partCalls[0].endsWith('--part 0') && partCalls[1].endsWith('--part 1'), JSON.stringify(partCalls))
+  const partCalls = good.calls.filter(c => /--part \d+ --id [0-9a-f]{16}$/.test(c))
+  check('spool: each part is read once, in order, naming the run\'s own spool', partCalls.length === PARTS && partCalls[0].endsWith('--part 0 --id ' + SPOOL_ID) && partCalls[1].endsWith('--part 1 --id ' + SPOOL_ID), JSON.stringify(partCalls))
 
   // An untrusted part count must fail loudly instead of looping against the gateway.
-  const bad = await renderWithDescriptor(JSON.stringify({ ok: true, spool: { parts: 99, bytes: 1 } }), 99)
+  const bad = await renderWithDescriptor(JSON.stringify({ ok: true, spool: { parts: 99, bytes: 1, id: SPOOL_ID } }), 99)
   const badOut = await waitForText(bad.page.render, /not a count this plugin trusts/)
   check('spool: an implausible part count is refused', /not a count this plugin trusts/.test(badOut.text), badOut.text.slice(0, 300))
-  check('spool: the refused count reads no parts', bad.calls.filter(c => /--part \d+$/.test(c)).length === 0, JSON.stringify(bad.calls))
+  check('spool: the refused count reads no parts', bad.calls.filter(c => /--part \d+/.test(c)).length === 0, JSON.stringify(bad.calls))
+
+  // A spool with no id cannot be read back at all: say so instead of fetching slices
+  // the script will refuse one by one.
+  const noId = await renderWithDescriptor(JSON.stringify({ ok: true, spool: { parts: PARTS, bytes: 1 } }), 97)
+  const noIdOut = await waitForText(noId.page.render, /no usable id/)
+  check('spool: a spool descriptor without an id is refused', /no usable id/.test(noIdOut.text), noIdOut.text.slice(0, 300))
+  check('spool: the id-less descriptor reads no parts', noId.calls.filter(c => /--part \d+/.test(c)).length === 0, JSON.stringify(noId.calls))
 }
 
 // ---------------------------------------------------------------------------
