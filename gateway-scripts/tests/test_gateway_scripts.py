@@ -262,5 +262,146 @@ class GatewayScriptTests(unittest.TestCase):
         self.assertIsNone(models.announcement_for("does-not-exist"))
 
 
+    # -- models endpoint ----------------------------------------------------
+
+    # One synthetic item in the shape https://opencode.ai/inference/go/v1/models
+    # documents: models.dev v2 fields plus the Go-only `go` object.
+    ENDPOINT_ITEM = {
+        "id": "foo-1.5",
+        "name": "Foo 1.5",
+        "release_date": "2026-05-01",
+        "limit": {"context": 1000000, "output": 64000},
+        "cost": {
+            "text": {
+                "input": {"price": 0.4, "cache": {"read": 0.04, "write": {"30m": 0.5, "12h": 1}},
+                          "overrides": [{"when": {"context": {"gt": 256000}}, "price": 1.2, "cache": {"read": 0.12}}]},
+                "output": {"price": 1.6, "overrides": [{"when": {"context": {"gt": 256000}}, "price": 4.8}]},
+            },
+            "multipliers": [{"when": {"utc_days": {"in": ["mon", "fri"]},
+                                      "any": [{"all": [{"utc_hours": {"gte": "01:00"}}, {"utc_hours": {"lt": "04:00"}}]}]},
+                             "factor": 2}],
+        },
+        "go": {"monthly_usage": {"go": 60, "go-plus": 180, "go-teams": 65},
+               "training": False, "zdr": True, "limited_regions": False},
+    }
+
+    def test_endpoint_entry_reads_prices_caps_and_privacy(self):
+        entry = self.models.endpoint_entry(self.ENDPOINT_ITEM)
+        self.assertEqual((entry["input"], entry["output"], entry["cache_read"]), (0.4, 1.6, 0.04))
+        # A cache-write price keyed by TTL takes the first (shortest) one listed.
+        self.assertEqual(entry["cache_write"], 0.5)
+        self.assertEqual(entry["context"], 1000000)
+        self.assertEqual(entry["released"], "2026-05-01")
+        self.assertEqual(entry["monthly_usage"], {"go": 60, "go-plus": 180, "go-teams": 65})
+        self.assertIs(entry["zdr"], True)
+        self.assertIs(entry["training"], False)
+        labels = [tier["label"] for tier in entry["tiers"]]
+        self.assertEqual(labels, ["> 256K tokens", "peak hours (2x)"])
+        self.assertEqual(entry["tiers"][0]["input"], 1.2)
+        self.assertEqual(entry["tiers"][0]["output"], 4.8)
+        self.assertEqual(entry["tiers"][1]["input"], 0.8)
+        self.assertEqual(entry["tiers"][1]["output"], 3.2)
+
+    def test_endpoint_entry_free_model_has_no_cap(self):
+        entry = self.models.endpoint_entry({
+            "id": "free-x", "name": "Free X",
+            "cost": {"text": {"input": {"price": 0, "cache": {"read": 0}}, "output": {"price": 0}}},
+            "go": {"monthly_usage": None, "training": True, "zdr": False},
+        })
+        self.assertEqual((entry["input"], entry["output"]), (0.0, 0.0))
+        self.assertIsNone(entry["monthly_usage"])
+        self.assertEqual(entry["tiers"], [])
+
+    def test_build_model_prefers_endpoint_over_catalog(self):
+        endpoint = {"foo-1.5": self.models.endpoint_entry(self.ENDPOINT_ITEM)}
+        catalog = {"foo-1.5": {"name": "Foo", "input": 9.0, "output": 9.0, "cache_read": 9.0, "context": 1}}
+        privacy = {"foo-1-5": {"training": None, "retention": "0 days", "zdr": True, "note_key": "foo"}}
+        record = self.models.build_model("foo-1.5", {}, catalog, privacy, {}, {}, endpoint)
+        self.assertEqual((record["input"], record["output"], record["cache_read"]), (0.4, 1.6, 0.04))
+        self.assertEqual(record["price_source"], "api")
+        self.assertEqual(record["monthly_usd"], 60)
+        self.assertEqual(record["monthly_by_plan"], {"go": 60, "go-plus": 180, "go-teams": 65})
+        self.assertEqual(record["cap_source"], "api")
+        self.assertEqual(record["price_check"], "differs")
+        self.assertEqual(record["released"], "2026-05-01")
+        self.assertEqual(record["privacy"], {"training": "not_used", "retention": "0 days", "zdr": True, "note_key": "foo"})
+        self.assertEqual([t["label"] for t in record["tiers"]], ["> 256K tokens", "peak hours (2x)"])
+
+    def test_build_model_privacy_from_endpoint_alone(self):
+        item = dict(self.ENDPOINT_ITEM, id="bar", name="Bar", go={"monthly_usage": None, "training": True, "zdr": False})
+        record = self.models.build_model("bar", {}, {}, {}, {}, {}, {"bar": self.models.endpoint_entry(item)})
+        self.assertEqual(record["privacy"], {"training": "used", "retention": "Not ZDR", "zdr": False, "note_key": None})
+        self.assertIsNone(record["monthly_usd"])
+
+    def test_announced_cap_never_overrides_a_published_one(self):
+        item = dict(self.ENDPOINT_ITEM, id="omen-alpha", name="Omen Alpha")
+        record = self.models.build_model("omen-alpha", {}, {}, {}, {}, {}, {"omen-alpha": self.models.endpoint_entry(item)})
+        self.assertEqual(record["monthly_usd"], 60)
+        self.assertEqual(record["cap_source"], "api")
+
+    def test_api_models_reads_the_public_list_without_a_key(self):
+        payload = json.dumps({"object": "list", "data": [self.ENDPOINT_ITEM]}).encode()
+        seen = []
+
+        def fake_get(url, headers=None, timeout=None):
+            seen.append((url, dict(headers or {})))
+            return payload, None
+
+        original_get, original_key = self.models.http_get, self.models.gateway_key
+        self.models.http_get, self.models.gateway_key = fake_get, lambda: ""
+        try:
+            entries, base, error, authed = self.models.api_models()
+        finally:
+            self.models.http_get, self.models.gateway_key = original_get, original_key
+        self.assertIsNone(error)
+        self.assertFalse(authed)
+        self.assertEqual(list(entries), ["foo-1.5"])
+        self.assertEqual(seen[0][0], self.models.DEFAULT_GO_BASE + "/models")
+        self.assertNotIn("Authorization", seen[0][1])
+
+    def test_parse_privacy_retention_only_table(self):
+        markdown = (
+            "| Model | Data retention |\n"
+            "| --- | --- |\n"
+            "| Bar 2 | 30 days |\n"
+            "| Baz | 0 days\\* |\n"
+        )
+        rows, _ = self.models.parse_privacy(markdown)
+        self.assertEqual(rows["bar-2"]["retention"], "30 days")
+        self.assertFalse(rows["bar-2"]["zdr"])
+        self.assertIsNone(rows["bar-2"]["training"])
+        self.assertTrue(rows["baz"]["zdr"])
+
+    def test_plan_info_reads_the_usage_limit_sentences(self):
+        markdown = (
+            "| **Go** | **$10/month** | x |\n\n"
+            "- The **5-hour limit** is 20% of your monthly allowance. The window starts later.\n"
+            "- The **weekly limit** is 50% of your monthly allowance. It resets on Monday.\n"
+        )
+        plan = self.models.plan_info(markdown)
+        self.assertEqual(plan["price_usd_month"], 10)
+        self.assertEqual(plan["five_hour_share"], 0.2)
+        self.assertEqual(plan["weekly_share"], 0.5)
+
+    def test_endpoint_entry_applies_a_scheduled_change_once_it_starts(self):
+        item = dict(self.ENDPOINT_ITEM, cost=dict(self.ENDPOINT_ITEM["cost"], multipliers=[
+            {"when": {"date": {"gte": "2026-12-01"}}, "factor": 2},
+        ]))
+        before = self.models.endpoint_entry(item, today=dt.date(2026, 11, 30))
+        self.assertEqual((before["input"], before["output"]), (0.4, 1.6))
+        self.assertEqual([t["label"] for t in before["tiers"]], ["> 256K tokens", "from 2026-12-01 (2x)"])
+        after = self.models.endpoint_entry(item, today=dt.date(2026, 12, 1))
+        self.assertEqual((after["input"], after["output"], after["cache_read"]), (0.8, 3.2, 0.08))
+        self.assertEqual([t["label"] for t in after["tiers"]], ["> 256K tokens"])
+        self.assertEqual((after["tiers"][0]["input"], after["tiers"][0]["output"]), (2.4, 9.6))
+
+    def test_id_only_model_list_keeps_catalog_prices(self):
+        endpoint = {"foo-1.5": self.models.endpoint_entry({"id": "foo-1.5"})}
+        catalog = {"foo-1.5": {"name": "Foo", "input": 0.5, "output": 2.0, "cache_read": 0.05, "context": 1}}
+        record = self.models.build_model("foo-1.5", {}, catalog, {}, {}, {}, endpoint)
+        self.assertEqual((record["input"], record["output"], record["cache_read"]), (0.5, 2.0, 0.05))
+        self.assertEqual(record["price_source"], "catalog")
+        self.assertIsNone(record["monthly_usd"])
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -291,6 +291,7 @@ function makeModelsPayload(now) {
         name: 'Promo Model',
         input: 0.15, output: 0.6, cache_read: 0.003,
         monthly_usd: 60, monthly_before_usd: 15,
+        monthly_by_plan: { go: 60, 'go-plus': 180, 'go-teams': 65 },
         req_5h: 26000, req_week: 65000, req_month: 130000,
         context: 1000000,
         promo: '4x · Ends Sep 27',
@@ -1011,6 +1012,10 @@ async function testOpencodeUsage() {
   check('page shows promo badge label', /4x · Ends Sep 27/.test(pageOut.text), pageOut.text)
   check('page shows catalog-priced dagger', /†/.test(pageOut.text), pageOut.text)
   check('page shows difference count', /1 of 7 prices differ/.test(pageOut.text), pageOut.text)
+  check('footer names the model list as the source when the API answered',
+    /Prices, caps and ZDR from the OpenCode Go model list/.test(pageOut.text), pageOut.text)
+  check('cap tooltip lists the per-plan monthly limits',
+    pageOut.titles.includes('Monthly limit: Go $60 · Go Plus $180 · Go Teams $65'), JSON.stringify(pageOut.titles))
   check('page shows uncapped group header', /Also served by Go, no published cap/.test(pageOut.text), pageOut.text)
   // `col-span-8` is a class the app never compiles (Tailwind scans the app's own
   // sources, never plugin files), so the divider spans with an inline style.
@@ -1037,7 +1042,7 @@ async function testOpencodeUsage() {
   check('the released column no longer comes from a month table', !source.includes('MONTH_ABBR'), source.slice(0, 60))
   check('a model with no registry date is a dash that says why',
     pageOut.titles.includes('not in the model registry, so it has no published release date'), JSON.stringify(pageOut.titles))
-  check('the stored models payload key was bumped for the new column', source.includes("'models_v2'") && !source.includes("'models_v1'"), source.slice(0, 60))
+  check('the stored models payload key was bumped for the API-sourced caps and ZDR', source.includes("'models_v3'") && !source.includes("'models_v2'"), source.slice(0, 60))
 
   // ZDR column (Part B)
   check('ZDR cell for a zero-retention model reads 0d', /\b0d\b/.test(pageOut.text), pageOut.text)
@@ -1575,9 +1580,9 @@ async function testOpencodeUsage() {
   // says it is -- a two-hour-old cache must never report 'just now'.
   const freshMod = (await loadPlugin('opencode-usage', { fresh: 3, scriptsDir: '/tmp/hdp-test/scripts' })).mod
   const stalePayload = makeModelsPayload(Date.now() - 2 * 3600000)
-  // The live storage key: a payload cached before the Released column existed
-  // lives under models_v1 and is deliberately ignored.
-  const restored = { models_v2: stalePayload }
+  // The live storage key: a payload cached before caps and ZDR came from the
+  // model list lives under models_v2 and is deliberately ignored.
+  const restored = { models_v3: stalePayload }
   const { ctx: freshCtx, contributions: freshContributions } = captureCtx()
   freshCtx.storage = {
     get: (k, f) => (k in restored ? restored[k] : f),
@@ -2067,7 +2072,7 @@ async function testOpencodeRefreshRace() {
     await settle()
     const out = render(page.render)
     check('overlap ' + stale + ': newer usage wins', render(chip.render).text.includes('23/47/6%'), render(chip.render).text)
-    check('overlap ' + stale + ': newer models stay in storage', stored.get('models_v2') === models || JSON.stringify(stored.get('models_v2')) === JSON.stringify(models))
+    check('overlap ' + stale + ': newer models stay in storage', stored.get('models_v3') === models || JSON.stringify(stored.get('models_v3')) === JSON.stringify(models))
     check('overlap ' + stale + ': stale errors are dropped', !/stale endpoint failure|Gateway call failed/.test(out.text), out.text.slice(0, 250))
     check('overlap ' + stale + ': newer models stay in state', stale === 'endpoint error' ? !/Promo Model/.test(out.text) : /Newer Model/.test(out.text))
   }
