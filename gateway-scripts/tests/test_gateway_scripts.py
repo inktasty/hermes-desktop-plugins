@@ -384,10 +384,10 @@ class GatewayScriptTests(unittest.TestCase):
         item = dict(self.ENDPOINT_ITEM, cost=dict(self.ENDPOINT_ITEM["cost"], multipliers=[
             {"when": {"date": {"gte": "2026-12-01"}}, "factor": 2},
         ]))
-        before = self.models.endpoint_entry(item, today=datetime.date(2026, 11, 30))
+        before = self.models.endpoint_entry(item, today=dt.date(2026, 11, 30))
         self.assertEqual((before["input"], before["output"]), (0.4, 1.6))
         self.assertEqual([t["label"] for t in before["tiers"]], ["> 256K tokens", "from 2026-12-01 (2x)"])
-        after = self.models.endpoint_entry(item, today=datetime.date(2026, 12, 1))
+        after = self.models.endpoint_entry(item, today=dt.date(2026, 12, 1))
         self.assertEqual((after["input"], after["output"], after["cache_read"]), (0.8, 3.2, 0.08))
         self.assertEqual([t["label"] for t in after["tiers"]], ["> 256K tokens"])
         self.assertEqual((after["tiers"][0]["input"], after["tiers"][0]["output"]), (2.4, 9.6))
