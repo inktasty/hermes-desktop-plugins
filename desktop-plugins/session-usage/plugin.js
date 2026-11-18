@@ -437,7 +437,9 @@ export default {
         throw new Error('run install.sh on the gateway')
       }
       const cached = ctx.storage && typeof ctx.storage.get === 'function' ? ctx.storage.get('py_cmd') : null
-      const candidates = cached && typeof cached === 'string' ? [cached] : PY_CANDIDATES
+      const candidates = PY_CANDIDATES.includes(cached)
+        ? [cached, ...PY_CANDIDATES.filter(py => py !== cached)]
+        : PY_CANDIDATES
       let lastCode = null
       const scriptPath = SCRIPTS_DIR + '/' + SCRIPT_NAME
       for (const py of candidates) {
@@ -464,7 +466,7 @@ export default {
           // fall through to next candidate
         }
       }
-      const tried = (cached ? [cached] : PY_CANDIDATES).join(', ')
+      const tried = candidates.join(', ')
       throw new Error('no working python on the gateway shell (tried ' + tried + ')' + (lastCode != null ? '; exit ' + lastCode : '') + '; run install.sh on the gateway')
     }
 
