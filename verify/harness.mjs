@@ -629,6 +629,30 @@ async function testSessionUsage() {
   // re-baselines from zero and the first tokens after the reset are still charged.
   const ratesCard = { input: 2, output: 1, cache_read: 1, provider: 'opencode-go', model: 'deepseek-v4.1-flash' }
   const offPeakMs = Date.UTC(2026, 8, 16, 20, 0)
+  const ratioRates = { input: 1, output: 1, cache_read: 0 }
+  const ratioSample = (prev, prompt, pct) => suNs.accumulate(prev,
+    { prompt, output: 0, cache_hit_pct: pct }, ratioRates, offPeakMs)
+  const ratioFirst = ratioSample(null, 100, 0)
+  const ratioCached = ratioSample(ratioFirst, 100, 100)
+  const ratioUncached = ratioSample(ratioCached, 100, 0)
+  check('accumulate ratio-only flips never re-charge prompt tokens',
+    [ratioFirst, ratioCached, ratioUncached].every(s => Math.abs(s.usd - 0.0001) < 1e-12),
+    JSON.stringify([ratioFirst.usd, ratioCached.usd, ratioUncached.usd]))
+  const ratioGrowth = ratioSample(ratioSample(ratioFirst, 200, 100), 300, 50)
+  check('accumulate splits only new prompt tokens at the current ratio',
+    Math.abs(ratioGrowth.usd - 0.00015) < 1e-12 && ratioGrowth.prompt === 300 &&
+      ratioGrowth.miss === 150 && ratioGrowth.cacheRead === 150,
+    JSON.stringify(ratioGrowth))
+  const ratioReset = ratioSample(ratioGrowth, 20, 50)
+  check('accumulate charges post-reset prompt tokens at the current ratio',
+    Math.abs(ratioReset.usd - 0.00016) < 1e-12 && ratioReset.prompt === 20 &&
+      ratioReset.miss === 160 && ratioReset.cacheRead === 160,
+    JSON.stringify(ratioReset))
+  const ratioLegacy = ratioSample({ miss: 60, cacheRead: 40, output: 0, usd: 0.00006 }, 120, 50)
+  check('accumulate uses the legacy charged split as the prompt baseline',
+    Math.abs(ratioLegacy.usd - 0.00007) < 1e-12 && ratioLegacy.prompt === 120 &&
+      ratioLegacy.miss === 70 && ratioLegacy.cacheRead === 50,
+    JSON.stringify(ratioLegacy))
   const resetPrev = { miss: 1000000, cacheRead: 0, output: 0, usd: 0.5 }
   const resetNext = suNs.accumulate(resetPrev, { prompt: 1000, input: 1000, output: 0, cache_hit_pct: 0 }, ratesCard, offPeakMs, 'deepseek-v4.1-flash')
   check('accumulate re-baselines a reset counter and still charges the new tokens',
