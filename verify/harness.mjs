@@ -1975,11 +1975,59 @@ async function testSpoolTransport() {
   check('spool: the id-less descriptor reads no parts', noId.calls.filter(c => /--part \d+/.test(c)).length === 0, JSON.stringify(noId.calls))
 }
 
+async function testPythonFallback() {
+  console.log('--- stale Python cache on a Windows gateway')
+  const scriptsDir = 'C:/fixture scripts'
+  const cases = [
+    ['session-usage', 'model_price_lookup.py', { ok: true, input: 1, output: 2 }, 'Rates per 1M tokens'],
+    ['opencode-usage', 'opencode_go_usage.py', makeSnapshot(Date.now()), '12/47/6%']
+  ]
+  sdk.host.state.focusedSessionId.set(null)
+  sdk.host.state.focusedUsage.set(null)
+
+  for (const [id, script, payload, expectedText] of cases) {
+    const storage = new Map([['py_cmd', 'python']])
+    const attempts = []
+    const quotedPath = '"' + scriptsDir + '/' + script + '"'
+    sdk.setRpc(async (method, params) => {
+      if (method !== 'shell.exec') return {}
+      attempts.push(params.command)
+      return params.command === 'py -3 ' + quotedPath
+        ? { stdout: JSON.stringify(payload), code: 0 }
+        : { stdout: '', code: 127 }
+    })
+    const register = async fresh => {
+      const { mod } = await loadPlugin(id, { fresh, scriptsDir })
+      const { ctx, contributions } = captureCtx()
+      ctx.storage.get = (key, fallback) => storage.get(key) ?? fallback
+      ctx.storage.set = (key, value) => storage.set(key, value)
+      stubTimers()
+      mod.register(ctx)
+      restoreTimers()
+      await settle()
+      return contributions.find(c => c.id === 'chip')
+    }
+
+    const chip = await register(100)
+    const expected = ['python', 'python3', 'py -3'].map(py => py + ' ' + quotedPath)
+    check(id + ': stale Python falls back in order without repeating a candidate',
+      JSON.stringify(attempts) === JSON.stringify(expected), JSON.stringify(attempts))
+    const out = render(chip.render)
+    check(id + ': data renders after interpreter fallback', out.text.includes(expectedText), out.text)
+
+    attempts.length = 0
+    await register(101)
+    check(id + ': the next load starts with the replacement interpreter',
+      attempts.length === 1 && attempts[0] === expected[2], JSON.stringify(attempts))
+  }
+}
+
 // ---------------------------------------------------------------------------
 await testDeepseekRate()
 await testSessionUsage()
 await testOpencodeUsage()
 await testSpoolTransport()
+await testPythonFallback()
 await proveOracle()
 
 console.log('\n' + passes + ' passed, ' + fails + ' failed')
