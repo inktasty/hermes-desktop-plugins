@@ -602,6 +602,29 @@ async function testSessionUsage() {
   const mergedFwd = suNs.mergeUsage({ input: 100 }, { input: 150, cache_hit_pct: 40 })
   check('mergeUsage takes a newer, larger live counter', mergedFwd.input === 150, JSON.stringify(mergedFwd))
 
+  const beforeCompression = { context_used: 100, context_max: 200, context_percent: 50, compressions: 0 }
+  const afterCompression = { context_used: 20, context_max: 200, context_percent: 10, compressions: 1 }
+  const compressed = suNs.mergeUsage(beforeCompression, afterCompression)
+  check('mergeUsage lets context drop after a compression',
+    compressed.context_used === 20 && compressed.context_percent === 10 && compressed.compressions === 1,
+    JSON.stringify(compressed))
+  const staleContext = suNs.mergeUsage(afterCompression, beforeCompression)
+  check('mergeUsage rejects context from a stale pre-compression frame',
+    staleContext.context_used === 20 && staleContext.context_percent === 10 && staleContext.compressions === 1,
+    JSON.stringify(staleContext))
+  const contextForward = suNs.mergeUsage(afterCompression, { ...afterCompression, context_used: 30, context_percent: 15 })
+  check('mergeUsage takes the arriving context on an ordering tie',
+    contextForward.context_used === 30 && contextForward.context_percent === 15, JSON.stringify(contextForward))
+  const staleTotal = suNs.mergeUsage({ ...afterCompression, total: 200 }, { ...afterCompression, total: 100, context_used: 10 })
+  check('mergeUsage rejects older context within a compression epoch', staleTotal.context_used === 20, JSON.stringify(staleTotal))
+  check('mergeUsage takes context without an existing snapshot',
+    suNs.mergeUsage(null, afterCompression).context_percent === 10)
+  check('mergeUsage keeps context when the incoming sample is absent',
+    suNs.mergeUsage(afterCompression, null).context_used === 20)
+  const invalidContext = suNs.mergeUsage(afterCompression, { compressions: 1, context_used: NaN, context_max: Infinity, context_percent: 'invalid' })
+  check('mergeUsage ignores non-finite context gauges',
+    invalidContext.context_used === 20 && invalidContext.context_max === 200 && invalidContext.context_percent === 10)
+
   // accumulate: a counter that went backwards is a gateway restart, so the sample
   // re-baselines from zero and the first tokens after the reset are still charged.
   const ratesCard = { input: 2, output: 1, cache_read: 1, provider: 'opencode-go', model: 'deepseek-v4.1-flash' }

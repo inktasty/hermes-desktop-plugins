@@ -259,9 +259,18 @@ function mergeUsage(polled, live) {
       if (!Number.isFinite(base[k]) || live[k] > base[k]) base[k] = live[k]
     }
   }
-  for (const k of ['context_used', 'context_max', 'compressions']) {
-    if (Number.isFinite(live[k])) base[k] = Math.max(base[k] || 0, live[k])
+  const baseCompressions = Number.isFinite(base.compressions) ? base.compressions : 0
+  const liveCompressions = Number.isFinite(live.compressions) ? live.compressions : 0
+  // Compression epochs order context samples even when occupancy drops.
+  // Within an epoch, total orders samples when available; ties take the arrival.
+  const newerContext = liveCompressions > baseCompressions || (liveCompressions === baseCompressions
+    && !(Number.isFinite(polled && polled.total) && Number.isFinite(live.total) && live.total < polled.total))
+  if (newerContext) {
+    for (const k of ['context_used', 'context_max', 'context_percent']) {
+      if (Number.isFinite(live[k])) base[k] = live[k]
+    }
   }
+  if (Number.isFinite(live.compressions)) base.compressions = Math.max(baseCompressions, live.compressions)
   // cache_hit_pct is a ratio, not a counter: take the latest value, never max.
   if (Number.isFinite(live.cache_hit_pct)) base.cache_hit_pct = live.cache_hit_pct
   if (typeof live.model === 'string' && live.model) base.model = live.model
