@@ -896,23 +896,14 @@ def build_model(model_id, docs, catalog, privacy=None, notes=None, releases=None
             for alt in (alternate_tiers(entry) if entry else [])
         ],
     }
-    if listed:
+    if listed and listed.get("input") is not None:
         # The model list API is OpenCode's own per-model record: it outranks the
-        # docs tables (when the page has any) and the catalog.
-        record.update({field: listed.get(field) for field in ("input", "output", "cache_read", "cache_write")})
-        record.update({
-            "name": listed.get("name") or record["name"],
-            "price_source": "api",
-            "price_check": price_check(listed, catalog_entry),
-        })
+        # docs tables (when the page has any) and the catalog. A list that carries
+        # only IDs (an older mirror) falls through to those instead.
+        record.update({field: listed.get(field) for field in PRICE_FIELDS})
+        record.update({"price_source": "api", "price_check": price_check(listed, catalog_entry)})
         if listed.get("tiers"):
             record["tiers"] = listed["tiers"]
-        usage = listed.get("monthly_usage") or {}
-        record["monthly_by_plan"] = usage or None
-        if usage.get("go") is not None:
-            record["monthly_usd"] = usage["go"]
-            record["monthly_before_usd"] = None
-            record["cap_source"] = "api"
     elif not entry and catalog_entry:
         # The docs have no row yet: price it from the live catalog and say so.
         record.update({
@@ -923,6 +914,14 @@ def build_model(model_id, docs, catalog, privacy=None, notes=None, releases=None
             "price_source": "catalog",
             "price_check": None,
         })
+    if listed:
+        record["name"] = listed.get("name") or record["name"]
+        usage = listed.get("monthly_usage") or {}
+        record["monthly_by_plan"] = usage or None
+        if usage.get("go") is not None:
+            record["monthly_usd"] = usage["go"]
+            record["monthly_before_usd"] = None
+            record["cap_source"] = "api"
 
     privacy = privacy or {}
     notes = notes or {}

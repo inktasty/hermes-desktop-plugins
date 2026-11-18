@@ -392,5 +392,13 @@ class GatewayScriptTests(unittest.TestCase):
         self.assertEqual([t["label"] for t in after["tiers"]], ["> 256K tokens"])
         self.assertEqual((after["tiers"][0]["input"], after["tiers"][0]["output"]), (2.4, 9.6))
 
+    def test_id_only_model_list_keeps_catalog_prices(self):
+        endpoint = {"foo-1.5": self.models.endpoint_entry({"id": "foo-1.5"})}
+        catalog = {"foo-1.5": {"name": "Foo", "input": 0.5, "output": 2.0, "cache_read": 0.05, "context": 1}}
+        record = self.models.build_model("foo-1.5", {}, catalog, {}, {}, {}, endpoint)
+        self.assertEqual((record["input"], record["output"], record["cache_read"]), (0.5, 2.0, 0.05))
+        self.assertEqual(record["price_source"], "catalog")
+        self.assertIsNone(record["monthly_usd"])
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
