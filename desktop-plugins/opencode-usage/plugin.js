@@ -1734,10 +1734,15 @@ export default {
       $modelsAt.set(Date.now() - 60 * 1000)
     }
 
+    let usageGeneration = 0
+    let modelsGeneration = 0
+
     refresh = async () => {
+      const generation = ++usageGeneration
       $loading.set(true)
       try {
         const snap = await runScript(SCRIPT_NAME)
+        if (generation !== usageGeneration) return
         if (snap.ok === false) {
           $error.set(String(snap.error || 'usage endpoint returned no data'))
           return
@@ -1746,17 +1751,19 @@ export default {
         $updatedAt.set(Date.now())
         $error.set(null)
       } catch (e) {
-        $error.set('Gateway call failed: ' + (e && e.message ? e.message : String(e)) + FAILURE_HINT)
+        if (generation === usageGeneration) $error.set('Gateway call failed: ' + (e && e.message ? e.message : String(e)) + FAILURE_HINT)
       } finally {
-        $loading.set(false)
+        if (generation === usageGeneration) $loading.set(false)
       }
     }
 
     refreshModels = async (force) => {
       if (!force && $modelsAt.get() && Date.now() - $modelsAt.get() < MODELS_TTL_MS) return
+      const generation = ++modelsGeneration
       $modelsLoading.set(true)
       try {
         const payload = await runScript(MODELS_SCRIPT)
+        if (generation !== modelsGeneration) return
         if (payload.ok === false) {
           $modelsError.set(String(payload.error || 'models endpoint returned no data'))
           return
@@ -1768,9 +1775,9 @@ export default {
           ctx.storage.set('models_v2', payload)
         }
       } catch (e) {
-        $modelsError.set('Gateway call failed: ' + (e && e.message ? e.message : String(e)) + FAILURE_HINT)
+        if (generation === modelsGeneration) $modelsError.set('Gateway call failed: ' + (e && e.message ? e.message : String(e)) + FAILURE_HINT)
       } finally {
-        $modelsLoading.set(false)
+        if (generation === modelsGeneration) $modelsLoading.set(false)
       }
     }
 

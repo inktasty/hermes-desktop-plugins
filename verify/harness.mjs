@@ -2022,12 +2022,65 @@ async function testPythonFallback() {
   }
 }
 
+async function testOpencodeRefreshRace() {
+  console.log('--- opencode-usage overlapping refreshes')
+  const before = passes
+  for (const stale of ['success', 'endpoint error', 'parse error']) {
+    const { mod } = await loadPlugin('opencode-usage', { fresh: 'race-' + stale, scriptsDir: '/tmp/hdp-test/scripts' })
+    const pending = { usage: [], models: [] }
+    sdk.setRpc((method, params) => {
+      const kind = String(params.command).includes('opencode_go_models.py') ? 'models' : 'usage'
+      return new Promise(resolve => pending[kind].push(resolve))
+    })
+    const stored = new Map()
+    const { ctx, contributions } = captureCtx()
+    ctx.storage.get = (key, fallback) => stored.get(key) ?? fallback
+    ctx.storage.set = (key, value) => stored.set(key, value)
+    stubTimers()
+    mod.register(ctx)
+    restoreTimers()
+    const refresh = contributions.find(c => c.area === 'palette' && c.data.id === 'opencodeGo.refresh').data.run
+    const page = contributions.find(c => c.area === 'routes')
+    const chip = contributions.find(c => c.id === 'chip')
+    refresh()
+    refresh()
+    const newer = makeSnapshot(Date.now())
+    newer.windows.rolling.used_percent = 23
+    const models = makeModelsPayload(Date.now())
+    models.models[0].name = 'Newer Model'
+    if (stale === 'endpoint error') {
+      models.models = []
+      models.promos = []
+    }
+    const reply = payload => ({ stdout: JSON.stringify(payload), code: 0 })
+    pending.usage[2](reply(newer))
+    pending.models[1](reply(models))
+    await settle()
+    const older = makeSnapshot(Date.now())
+    older.windows.rolling.used_percent = 81
+    const staleReply = payload => stale === 'success' ? reply(payload)
+      : stale === 'endpoint error' ? reply({ ok: false, error: 'stale endpoint failure' })
+        : { stdout: 'not JSON', code: 0 }
+    pending.usage[0](staleReply(older))
+    pending.usage[1](staleReply(older))
+    pending.models[0](staleReply(makeModelsPayload(Date.now() - 60000)))
+    await settle()
+    const out = render(page.render)
+    check('overlap ' + stale + ': newer usage wins', render(chip.render).text.includes('23/47/6%'), render(chip.render).text)
+    check('overlap ' + stale + ': newer models stay in storage', stored.get('models_v2') === models || JSON.stringify(stored.get('models_v2')) === JSON.stringify(models))
+    check('overlap ' + stale + ': stale errors are dropped', !/stale endpoint failure|Gateway call failed/.test(out.text), out.text.slice(0, 250))
+    check('overlap ' + stale + ': newer models stay in state', stale === 'endpoint error' ? !/Promo Model/.test(out.text) : /Newer Model/.test(out.text))
+  }
+  console.log('overlapping refresh regression: ' + (passes - before) + '/12 passed')
+}
+
 // ---------------------------------------------------------------------------
 await testDeepseekRate()
 await testSessionUsage()
 await testOpencodeUsage()
 await testSpoolTransport()
 await testPythonFallback()
+await testOpencodeRefreshRace()
 await proveOracle()
 
 console.log('\n' + passes + ' passed, ' + fails + ' failed')
