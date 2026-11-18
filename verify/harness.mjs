@@ -863,6 +863,41 @@ async function testSessionUsage() {
   const expectWinUsd = (36000 * 0.15 + 84000 * 0.003 + 8000 * 0.6) / 1000000
   check('Windows gateway: chip shows real value after python3 fails', winCost === '$' + expectWinUsd.toFixed(3), 'want $' + expectWinUsd.toFixed(3) + ' got ' + winCost + ' text=' + winOut.text)
   check('Windows gateway: working interpreter is cached', stored.py_cmd === 'python', 'stored=' + stored.py_cmd)
+
+  // A pricing failure is a valid response from a working interpreter.
+  const { ctx: errorCtx, contributions: errorContributions } = captureCtx()
+  let cachedPython
+  errorCtx.storage = { get: () => cachedPython, set: (_, py) => { cachedPython = py } }
+  const pricingError = 'no registry entry for ' + USAGE.model
+  let pricingReply = JSON.stringify({ ok: false, error: pricingError })
+  const priceCommands = []
+  sdk.setRpc(async (method, params) => {
+    if (method === 'session.usage') return USAGE
+    if (method === 'shell.exec') {
+      priceCommands.push(params.command)
+      return { stdout: pricingReply + '\n', stderr: '', code: 0 }
+    }
+    return {}
+  })
+  stubTimers()
+  sdk.host.state.focusedSessionId.set('sess-pricing-error')
+  sdk.host.state.focusedUsage.set(USAGE)
+  mod.register(errorCtx)
+  restoreTimers()
+  await settle()
+  const renderErrorChip = errorContributions[0].render
+  const pricingFailed = render(renderErrorChip)
+  check('Session Usage shows the pricing script error, not an interpreter error',
+    pricingFailed.text.includes(pricingError) && !pricingFailed.text.includes('no working python'), pricingFailed.text)
+  check('pricing error stops probing and caches the working interpreter',
+    priceCommands.length > 0 && priceCommands.every(cmd => cmd.startsWith('python3 ')) && cachedPython === 'python3',
+    JSON.stringify(priceCommands))
+
+  pricingReply = priceLine
+  await timers.find(t => t.ms === 120000).fn()
+  const pricingRecovered = render(renderErrorChip)
+  check('the next successful lookup clears the error and restores the estimate',
+    !pricingRecovered.text.includes(pricingError) && pricingRecovered.text.includes('$' + expectUsd.toFixed(3)), pricingRecovered.text)
   Date.now = realNow
 }
 
