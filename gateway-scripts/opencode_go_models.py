@@ -361,7 +361,22 @@ def describe_when(when):
     return "conditional"
 
 
-def endpoint_entry(item):
+PRICE_FIELDS = ("input", "output", "cache_read", "cache_write")
+
+
+def _scaled(prices, factor):
+    return {field: (prices[field] * factor if prices.get(field) is not None else None) for field in PRICE_FIELDS}
+
+
+def _scheduled_start(when):
+    """The start date of a date-only condition ('YYYY-MM-DD'), else None."""
+    if isinstance(when, dict) and set(when) == {"date"} and isinstance(when["date"], dict):
+        start = str(when["date"].get("gte") or "")[:10]
+        return start or None
+    return None
+
+
+def endpoint_entry(item, today=None):
     """One model list item, slimmed to what the table reads.
 
     `cost.text` holds the base card; `overrides` (long-context prices) and
@@ -389,14 +404,21 @@ def endpoint_entry(item):
             "cache_read": _cache_price(override.get("cache"), "read"),
             "cache_write": _cache_price(override.get("cache"), "write"),
         })
-    for multiplier in cost.get("multipliers") or []:
-        factor = as_float((multiplier or {}).get("factor")) if isinstance(multiplier, dict) else None
-        if not factor:
-            continue
-        tiers.append(dict(
-            {"label": "%s (%gx)" % (describe_when(multiplier.get("when")), factor)},
-            **{field: (value * factor if value is not None else None) for field, value in base.items()}
-        ))
+    today = (today or dt.datetime.now(dt.timezone.utc).date()).isoformat()
+    multipliers = [m for m in (cost.get("multipliers") or []) if isinstance(m, dict) and as_float(m.get("factor"))]
+    upcoming = []
+    for multiplier in multipliers:
+        start = _scheduled_start(multiplier.get("when"))
+        if start and start <= today:
+            # A scheduled price change that has started is simply the price now.
+            factor = as_float(multiplier["factor"])
+            base = _scaled(base, factor)
+            tiers = [dict(tier, **_scaled(tier, factor)) for tier in tiers]
+        else:
+            upcoming.append(multiplier)
+    for multiplier in upcoming:
+        factor = as_float(multiplier["factor"])
+        tiers.append(dict({"label": "%s (%gx)" % (describe_when(multiplier.get("when")), factor)}, **_scaled(base, factor)))
 
     go = item.get("go") if isinstance(item.get("go"), dict) else {}
     usage = go.get("monthly_usage")

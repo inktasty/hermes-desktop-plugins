@@ -380,5 +380,17 @@ class GatewayScriptTests(unittest.TestCase):
         self.assertEqual(plan["five_hour_share"], 0.2)
         self.assertEqual(plan["weekly_share"], 0.5)
 
+    def test_endpoint_entry_applies_a_scheduled_change_once_it_starts(self):
+        item = dict(self.ENDPOINT_ITEM, cost=dict(self.ENDPOINT_ITEM["cost"], multipliers=[
+            {"when": {"date": {"gte": "2026-12-01"}}, "factor": 2},
+        ]))
+        before = self.models.endpoint_entry(item, today=datetime.date(2026, 11, 30))
+        self.assertEqual((before["input"], before["output"]), (0.4, 1.6))
+        self.assertEqual([t["label"] for t in before["tiers"]], ["> 256K tokens", "from 2026-12-01 (2x)"])
+        after = self.models.endpoint_entry(item, today=datetime.date(2026, 12, 1))
+        self.assertEqual((after["input"], after["output"], after["cache_read"]), (0.8, 3.2, 0.08))
+        self.assertEqual([t["label"] for t in after["tiers"]], ["> 256K tokens"])
+        self.assertEqual((after["tiers"][0]["input"], after["tiers"][0]["output"]), (2.4, 9.6))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
