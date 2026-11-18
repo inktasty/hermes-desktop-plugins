@@ -63,19 +63,30 @@ def entry_for(cache: dict, provider: str, model: str):
 
     Callers want the entry itself, not only its cost card: the registry carries
     entries with a release_date and no cost dict at all, and those still answer
-    with a date.
+    with a date. Exact ids win, ignoring case as a fallback. Boundary-aware
+    prefixes prefer the longest registry id for snapshots, then the shortest
+    registry id extending an abbreviated request.
     """
     section = cache.get(provider)
     models = section.get("models") if isinstance(section, dict) else None
     if not isinstance(models, dict):
         return None
-    hit = models.get(model)
-    if hit is None:
-        # Tolerate date/snapshot suffixes: exact prefix match, shortest id wins.
-        cands = [k for k in models if k.lower().startswith(model.lower()) or model.lower().startswith(k.lower())]
-        if not cands:
+    if model in models:
+        hit = models[model]
+    else:
+        requested = model.lower()
+        exact = sorted(k for k in models if k.lower() == requested)
+        snapshots = [k for k in models if requested.startswith(k.lower())
+                     and requested[len(k):len(k) + 1] in "-_.:@/"
+                     and len(k) < len(requested)]
+        reverse = [k for k in models if k.lower().startswith(requested)
+                   and k[len(model):len(model) + 1] in "-_.:@/"
+                   and len(model) < len(k)]
+        candidates = (exact or sorted(snapshots, key=lambda k: (-len(k), k))
+                      or sorted(reverse, key=lambda k: (len(k), k)))
+        if not candidates:
             return None
-        hit = models[sorted(cands, key=len)[0]]
+        hit = models[candidates[0]]
     return hit if isinstance(hit, dict) else None
 
 
