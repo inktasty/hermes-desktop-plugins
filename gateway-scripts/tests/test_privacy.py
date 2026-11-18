@@ -50,6 +50,7 @@ class PrivacyTests(unittest.TestCase):
     def test_allowed(self):
         for value in ("a" + "@example.com", "b" + "@example.org",
                       "noreply" + "@mail.invalid", "no-reply" + "@mail.invalid",
+                      "1+someone" + "@users.noreply.github.com",
                       "127.0.0.1", "0.0.0.0", "::1", "::", "2001:db8::1234",
                       "192.0.2.7", "198.51.100.9", "203.0.113.4",
                       "/home/" + "USER", "/Users/" + "you", "C:\\Users\\" + "USER",
@@ -92,6 +93,42 @@ class PrivacyTests(unittest.TestCase):
             result = run()
             self.assertEqual(result.returncode, 2)
             self.assertIn("unable to read tracked files", result.stderr)
+
+    def test_commit_messages_masking_and_exit_codes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def git(*args):
+                subprocess.run(["git", "-c", "user.name=Fixture", "-c",
+                                "user.email=1+fixture" + "@users.noreply.github.com",
+                                *args], cwd=root, check=True, capture_output=True)
+            def run(revision_range):
+                return subprocess.run([sys.executable, str(SCRIPT), "--commits", revision_range],
+                                      cwd=root, capture_output=True, text=True)
+            git("init", "-q")
+            git("commit", "-q", "--allow-empty", "-m", "base")
+            git("commit", "-q", "--allow-empty", "-m",
+                "clean change\n\nCo-authored-by: Bot <2+bot" + "@users.noreply.github.com>")
+            self.assertEqual(run("HEAD~1..HEAD").returncode, 0)
+            git("commit", "-q", "--allow-empty", "-m",
+                "leaky change\n\nCo-Authored-By: Someone <" + fake_email() + ">\n" + fake_key())
+            sha = subprocess.check_output(["git", "rev-parse", "--short=12", "HEAD"],
+                                          cwd=root, text=True).strip()
+            result = run("HEAD~2..HEAD")
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(f"commit {sha} message:3: email: [REDACTED]", result.stdout)
+            self.assertIn(f"commit {sha} message:4: api-key: [REDACTED]", result.stdout)
+            self.assertIn("Privacy check (commits): 2 finding(s).", result.stdout)
+            self.assertNotIn(fake_email(), result.stdout + result.stderr)
+            self.assertNotIn(fake_key(), result.stdout + result.stderr)
+            git("-c", "user.email=" + fake_email(), "commit", "-q", "--allow-empty", "-m", "clean")
+            result = run("HEAD~1..HEAD")
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("author: email: [REDACTED]", result.stdout)
+            self.assertIn("committer: email: [REDACTED]", result.stdout)
+            self.assertEqual(run("HEAD..HEAD").returncode, 0)
+            result = run("no-such-revision..HEAD")
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("unable to read commits", result.stderr)
 
 
 if __name__ == "__main__":

@@ -14,11 +14,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
       - name: Check tracked files for private data
         run: python3 verify/privacy.py
+      # Commit messages are public as soon as a branch is pushed, so check every
+      # commit the PR or push adds, not just the files they leave behind.
+      - name: Check commit messages for private data
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            range="$PR_BASE..$PR_HEAD"
+          elif [ "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            range="$BEFORE..$GITHUB_SHA"
+          else
+            range="origin/$DEFAULT_BRANCH..$GITHUB_SHA"
+          fi
+          python3 verify/privacy.py --commits "$range"
 
   harness:
     runs-on: ubuntu-latest
