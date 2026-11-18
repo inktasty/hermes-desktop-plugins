@@ -194,7 +194,8 @@ function costOf(miss, cacheRead, output, card) {
 }
 
 // Price only the tokens NEW since the last sample, at the card in effect now, so
-// a session that crosses a peak boundary is not repriced as a whole. The first
+// a session that crosses a peak boundary is not repriced as a whole. Split only
+// new prompt tokens at the current cache ratio, never repricing old tokens. The first
 // sample of a session prices whatever it already has at that moment's card.
 // `sessionModel` is the model THIS session actually ran (from its usage frame);
 // the rate card alone can say deepseek while the session ran something else,
@@ -217,13 +218,16 @@ function accumulate(prev, u, rates, nowMs, sessionModel) {
   const card = rateCard(rates, peak)
   const now = tokensOf(u)
   const base = prev || { miss: 0, cacheRead: 0, output: 0, usd: 0 }
-  // A counter that went backwards is a gateway restart, not negative spend:
-  // re-baseline that counter from zero so the first tokens after the reset are
-  // still charged, instead of being silently dropped by Math.max(0, ...).
+  // Only authoritative prompt/output counters detect gateway resets; derived
+  // cache splits can decrease just because the ratio changed. Legacy state
+  // reconstructs its prompt baseline from the charged split.
+  const basePrompt = Number.isFinite(base.prompt) ? base.prompt : (base.miss || 0) + (base.cacheRead || 0)
   const delta = (nowV, baseV) => (nowV >= (baseV || 0) ? nowV - (baseV || 0) : nowV)
+  const newPrompt = delta(now.prompt, basePrompt)
+  const newSplit = tokensOf({ ...u, prompt: newPrompt, input: newPrompt })
   const deltaUsd = costOf(
-    delta(now.miss, base.miss),
-    delta(now.cacheRead, base.cacheRead),
+    newSplit.miss,
+    newSplit.cacheRead,
     delta(now.output, base.output),
     card
   )
@@ -237,8 +241,9 @@ function accumulate(prev, u, rates, nowMs, sessionModel) {
     priced: card.priced,
     provider: rates.provider,
     model: rates.model,
-    miss: now.miss,
-    cacheRead: now.cacheRead,
+    prompt: now.prompt,
+    miss: (base.miss || 0) + newSplit.miss,
+    cacheRead: (base.cacheRead || 0) + newSplit.cacheRead,
     output: now.output
   }
 }
