@@ -603,10 +603,57 @@ async function testSessionUsage() {
   const mergedFwd = suNs.mergeUsage({ input: 100 }, { input: 150, cache_hit_pct: 40 })
   check('mergeUsage takes a newer, larger live counter', mergedFwd.input === 150, JSON.stringify(mergedFwd))
 
+  const beforeCompression = { context_used: 100, context_max: 200, context_percent: 50, compressions: 0 }
+  const afterCompression = { context_used: 20, context_max: 200, context_percent: 10, compressions: 1 }
+  const compressed = suNs.mergeUsage(beforeCompression, afterCompression)
+  check('mergeUsage lets context drop after a compression',
+    compressed.context_used === 20 && compressed.context_percent === 10 && compressed.compressions === 1,
+    JSON.stringify(compressed))
+  const staleContext = suNs.mergeUsage(afterCompression, beforeCompression)
+  check('mergeUsage rejects context from a stale pre-compression frame',
+    staleContext.context_used === 20 && staleContext.context_percent === 10 && staleContext.compressions === 1,
+    JSON.stringify(staleContext))
+  const contextForward = suNs.mergeUsage(afterCompression, { ...afterCompression, context_used: 30, context_percent: 15 })
+  check('mergeUsage takes the arriving context on an ordering tie',
+    contextForward.context_used === 30 && contextForward.context_percent === 15, JSON.stringify(contextForward))
+  const staleTotal = suNs.mergeUsage({ ...afterCompression, total: 200 }, { ...afterCompression, total: 100, context_used: 10 })
+  check('mergeUsage rejects older context within a compression epoch', staleTotal.context_used === 20, JSON.stringify(staleTotal))
+  check('mergeUsage takes context without an existing snapshot',
+    suNs.mergeUsage(null, afterCompression).context_percent === 10)
+  check('mergeUsage keeps context when the incoming sample is absent',
+    suNs.mergeUsage(afterCompression, null).context_used === 20)
+  const invalidContext = suNs.mergeUsage(afterCompression, { compressions: 1, context_used: NaN, context_max: Infinity, context_percent: 'invalid' })
+  check('mergeUsage ignores non-finite context gauges',
+    invalidContext.context_used === 20 && invalidContext.context_max === 200 && invalidContext.context_percent === 10)
+
   // accumulate: a counter that went backwards is a gateway restart, so the sample
   // re-baselines from zero and the first tokens after the reset are still charged.
   const ratesCard = { input: 2, output: 1, cache_read: 1, provider: 'opencode-go', model: 'deepseek-v4.1-flash' }
   const offPeakMs = Date.UTC(2026, 8, 16, 20, 0)
+  const ratioRates = { input: 1, output: 1, cache_read: 0 }
+  const ratioSample = (prev, prompt, pct) => suNs.accumulate(prev,
+    { prompt, output: 0, cache_hit_pct: pct }, ratioRates, offPeakMs)
+  const ratioFirst = ratioSample(null, 100, 0)
+  const ratioCached = ratioSample(ratioFirst, 100, 100)
+  const ratioUncached = ratioSample(ratioCached, 100, 0)
+  check('accumulate ratio-only flips never re-charge prompt tokens',
+    [ratioFirst, ratioCached, ratioUncached].every(s => Math.abs(s.usd - 0.0001) < 1e-12),
+    JSON.stringify([ratioFirst.usd, ratioCached.usd, ratioUncached.usd]))
+  const ratioGrowth = ratioSample(ratioSample(ratioFirst, 200, 100), 300, 50)
+  check('accumulate splits only new prompt tokens at the current ratio',
+    Math.abs(ratioGrowth.usd - 0.00015) < 1e-12 && ratioGrowth.prompt === 300 &&
+      ratioGrowth.miss === 150 && ratioGrowth.cacheRead === 150,
+    JSON.stringify(ratioGrowth))
+  const ratioReset = ratioSample(ratioGrowth, 20, 50)
+  check('accumulate charges post-reset prompt tokens at the current ratio',
+    Math.abs(ratioReset.usd - 0.00016) < 1e-12 && ratioReset.prompt === 20 &&
+      ratioReset.miss === 160 && ratioReset.cacheRead === 160,
+    JSON.stringify(ratioReset))
+  const ratioLegacy = ratioSample({ miss: 60, cacheRead: 40, output: 0, usd: 0.00006 }, 120, 50)
+  check('accumulate uses the legacy charged split as the prompt baseline',
+    Math.abs(ratioLegacy.usd - 0.00007) < 1e-12 && ratioLegacy.prompt === 120 &&
+      ratioLegacy.miss === 70 && ratioLegacy.cacheRead === 50,
+    JSON.stringify(ratioLegacy))
   const resetPrev = { miss: 1000000, cacheRead: 0, output: 0, usd: 0.5 }
   const resetNext = suNs.accumulate(resetPrev, { prompt: 1000, input: 1000, output: 0, cache_hit_pct: 0 }, ratesCard, offPeakMs, 'deepseek-v4.1-flash')
   check('accumulate re-baselines a reset counter and still charges the new tokens',
