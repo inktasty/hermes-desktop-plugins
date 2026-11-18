@@ -168,9 +168,12 @@ class GatewayScriptTests(unittest.TestCase):
             }
         }
         self.assertEqual(self.price.entry_for(cache, "opencode-go", "gpt-4o")["cost"]["input"], 1)
-        # No exact match: the shortest prefix candidate wins (documented behavior).
+        # No exact match: the most specific card wins.
         hit = self.price.entry_for(cache, "opencode-go", "deepseek-chat-v3-0324")
-        self.assertEqual(hit["cost"]["input"], 2)
+        self.assertEqual(hit["cost"]["input"], 3)
+        self.assertEqual(self.price.entry_for(cache, "opencode-go", "DEEPSEEK-CHAT-V3")["cost"]["input"], 3)
+        boundary_cache = {"opencode-go": {"models": {"gpt-4": {"cost": {"input": 4}}}}}
+        self.assertIsNone(self.price.entry_for(boundary_cache, "opencode-go", "gpt-4o-mini"))
         # A reverse prefix ('gpt' < 'gpt-4o') also matches the served snapshot.
         self.assertEqual(self.price.entry_for(cache, "opencode-go", "gpt")["cost"]["input"], 1)
         self.assertIsNone(self.price.entry_for(cache, "opencode-go", "nope"))

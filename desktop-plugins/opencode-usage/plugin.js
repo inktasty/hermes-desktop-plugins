@@ -1625,15 +1625,16 @@ export default {
   register(ctx) {
     pluginCtx = ctx
     // One interpreter probe, shared by every call: try each candidate until one
-    // exits 0, then hand back its stdout. The winner is cached, so the probe costs
-    // nothing after the first success. `args` are internal literals ('--part', '0'),
-    // never user text.
+    // exits 0, then hand back its stdout. Try the cached winner first when known.
+    // `args` are internal literals ('--part', '0'), never user text.
     async function execScript(scriptName, args) {
       if (SCRIPTS_DIR.startsWith('__HERMES')) {
         throw new Error('run install.sh on the gateway')
       }
       const cached = ctx.storage && typeof ctx.storage.get === 'function' ? ctx.storage.get('py_cmd') : null
-      const candidates = cached && typeof cached === 'string' ? [cached] : PY_CANDIDATES
+      const candidates = PY_CANDIDATES.includes(cached)
+        ? [cached, ...PY_CANDIDATES.filter(py => py !== cached)]
+        : PY_CANDIDATES
       let lastCode = null
       let lastError = null
       let sawOutput = false
@@ -1669,7 +1670,7 @@ export default {
           lastError = e
         }
       }
-      const tried = (cached ? [cached] : PY_CANDIDATES).join(', ')
+      const tried = candidates.join(', ')
       throw new Error('no working python on the gateway shell (tried ' + tried + ')' + (lastCode != null ? '; exit ' + lastCode : '') + (lastError ? '; ' + (lastError.message || lastError) : '') + (sawOutput ? '; the script printed output this plugin could not parse (larger than the gateway reply limit?)' : '') + '; run install.sh on the gateway')
     }
 
