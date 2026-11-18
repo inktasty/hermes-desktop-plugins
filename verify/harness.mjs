@@ -1181,7 +1181,7 @@ async function testOpencodeUsage() {
   check('shell quote: cmd.exe form', ns.shellQuote('C:/Users/x/scripts/a.py', true) === '"C:/Users/x/scripts/a.py"', ns.shellQuote('C:/Users/x/scripts/a.py', true))
   check('shell quote: a space is protected on both', ns.shellQuote('/home/x y/a.py', false) === "'/home/x y/a.py'" && ns.shellQuote('C:/x y/a.py', true) === '"C:/x y/a.py"', 'both')
   check('shell quote: a literal $ cannot expand on POSIX', ns.shellQuote('/home/$x/a.py', false) === "'/home/$x/a.py'", ns.shellQuote('/home/$x/a.py', false))
-  check('shell quote: an embedded quote is escaped, not left to break out', ns.shellQuote("/home/it's/a.py", false).indexOf("'\\''") !== -1, ns.shellQuote("/home/it's/a.py", false))
+  check('shell quote: an embedded quote is escaped, not left to break out', ns.shellQuote("/home/it's/a.py", false).indexOf("'\\''") !== -1, ns.shellQuote("/home/it's/a.py", false)) // privacy: allow=home -- synthetic shell-escaping fixture
   check('shell quote: the gateway decides, not the value', ns.shellQuote('C:/Users/x/a.py') === ns.shellQuote('C:/Users/x/a.py', false) && ns.shellQuote('/home/x/a.py') === ns.shellQuote('/home/x/a.py', false), ns.shellQuote('C:/Users/x/a.py'))
   check('shell quote: a double quote is refused for cmd.exe', (() => { try { ns.shellQuote('C:/a"b', true); return false } catch (e) { return true } })(), 'throws')
   const refreshBtn = primOf(pageOut, 'Button').find(b => b.props.children === 'Refresh')
