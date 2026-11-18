@@ -65,7 +65,21 @@ Ctrl+K). Editing a file inside an already-loaded plugin hot-reloads in seconds.
 ### Deploying to the app machine (remote gateway)
 
 When the app's gateway is remote from the app (the app on Windows, the gateway
-elsewhere), run this from a clone of the repo **on the app machine**:
+elsewhere), install on each machine from its own clone of the repo.
+
+**1. On the gateway machine**, install the gateway scripts:
+
+```bash
+./install.sh                          # gateway home ~/.hermes
+HERMES_HOME=/opt/hermes ./install.sh  # ...or a non-default gateway home
+```
+
+This copies the three scripts into `$HERMES_HOME/scripts/` and prints that path
+(`installed gateway scripts -> ...`); it is the `-ScriptsDir` for step 2. It also
+copies the plugins into the gateway machine's own `~/.hermes/desktop-plugins/`,
+which nothing reads unless an app runs there too.
+
+**2. On the app machine**, deploy the plugins pointed at the gateway's scripts:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\deploy-windows.ps1 -ScriptsDir /opt/hermes/scripts
@@ -162,6 +176,15 @@ HERMES_HOME=/opt/hermes ./uninstall.sh
 
 Remove only the app-side plugin folder and the gateway scripts it installed; a
 chip disappears after **Reload desktop plugins** from the command palette.
+
+With a remote gateway, run it on each machine, from that machine's clone:
+
+- **Gateway machine:** `./uninstall.sh` (or `HERMES_HOME=/opt/hermes ./uninstall.sh`)
+  removes the scripts, plus the plugin copies `install.sh` left there.
+- **App machine (Windows):** `./uninstall.sh` from Git Bash removes the plugin
+  folders under `%LOCALAPPDATA%\hermes\desktop-plugins\`; its gateway-script
+  lines print `absent`, since the scripts live on the gateway. Without Git Bash,
+  delete the three `<id>` folders there by hand.
 
 ## Verify before trusting it
 
