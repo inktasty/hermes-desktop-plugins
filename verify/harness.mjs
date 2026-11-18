@@ -726,6 +726,34 @@ async function testSessionUsage() {
       qNs.shellQuote("/tmp/it's scripts/a.py"))
   }
 
+  {
+    let snapshot = { model: USAGE.model, prompt: 100000, input: 100000, output: 0, total: 100000, cache_hit_pct: 0 }
+    sdk.host.state.focusedSessionId.set('sess-reset')
+    sdk.host.state.focusedUsage.set(null)
+    sdk.setRpc(async method => {
+      if (method === 'session.usage') return { ...snapshot }
+      if (method === 'shell.exec') return { stdout: JSON.stringify({ ...ratesCard, ok: true }) + '\n', code: 0 }
+      return {}
+    })
+    stubTimers()
+    Date.now = () => offPeakMs
+    const resetCtx = captureCtx()
+    mod.register(resetCtx.ctx)
+    restoreTimers()
+    await settle()
+    const resetFetch = timers.find(t => t.ms === 120000)?.fn
+    const resetChip = resetCtx.contributions[0].render
+    const resetCost = () => (render(resetChip).text.match(/\$[\d.]+/) || [])[0]
+    check('poll reset starts with the pre-reset accumulated cost', resetCost() === '$0.200', resetCost())
+    snapshot = { ...snapshot, prompt: 1000, input: 1000, total: 1000 }
+    await resetFetch()
+    check('poll reset reaches the accumulator and charges the first new tokens', resetCost() === '$0.202', resetCost())
+    snapshot = { ...snapshot, prompt: 2000, input: 2000, total: 2000 }
+    await resetFetch()
+    check('poll reset continues charging only new tokens', resetCost() === '$0.204', resetCost())
+    await resetFetch()
+    check('poll reset repeated snapshot does not double-charge', resetCost() === '$0.204', resetCost())
+  }
   // Baseline case with default Linux-style python3 success
   sdk.setRpc(async (method, params) => {
     if (method === 'session.usage') return USAGE

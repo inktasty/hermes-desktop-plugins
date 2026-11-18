@@ -522,8 +522,8 @@ export default {
         if (resp && typeof resp === 'object') {
           delete resp.credits_lines // nous-balance owns credits display
           const curMap = sessData.get()
-          const prev = curMap[sid] || null
-          const merged = mergeUsage(prev, resp)
+          // Polls are authoritative snapshots; only live frames need max merging.
+          const merged = mergeUsage(null, resp)
           merged.sid = sid
           sessData.set({ ...curMap, [sid]: merged })
           const times = fetchedAt.get()
