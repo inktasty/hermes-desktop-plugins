@@ -602,10 +602,57 @@ async function testSessionUsage() {
   const mergedFwd = suNs.mergeUsage({ input: 100 }, { input: 150, cache_hit_pct: 40 })
   check('mergeUsage takes a newer, larger live counter', mergedFwd.input === 150, JSON.stringify(mergedFwd))
 
+  const beforeCompression = { context_used: 100, context_max: 200, context_percent: 50, compressions: 0 }
+  const afterCompression = { context_used: 20, context_max: 200, context_percent: 10, compressions: 1 }
+  const compressed = suNs.mergeUsage(beforeCompression, afterCompression)
+  check('mergeUsage lets context drop after a compression',
+    compressed.context_used === 20 && compressed.context_percent === 10 && compressed.compressions === 1,
+    JSON.stringify(compressed))
+  const staleContext = suNs.mergeUsage(afterCompression, beforeCompression)
+  check('mergeUsage rejects context from a stale pre-compression frame',
+    staleContext.context_used === 20 && staleContext.context_percent === 10 && staleContext.compressions === 1,
+    JSON.stringify(staleContext))
+  const contextForward = suNs.mergeUsage(afterCompression, { ...afterCompression, context_used: 30, context_percent: 15 })
+  check('mergeUsage takes the arriving context on an ordering tie',
+    contextForward.context_used === 30 && contextForward.context_percent === 15, JSON.stringify(contextForward))
+  const staleTotal = suNs.mergeUsage({ ...afterCompression, total: 200 }, { ...afterCompression, total: 100, context_used: 10 })
+  check('mergeUsage rejects older context within a compression epoch', staleTotal.context_used === 20, JSON.stringify(staleTotal))
+  check('mergeUsage takes context without an existing snapshot',
+    suNs.mergeUsage(null, afterCompression).context_percent === 10)
+  check('mergeUsage keeps context when the incoming sample is absent',
+    suNs.mergeUsage(afterCompression, null).context_used === 20)
+  const invalidContext = suNs.mergeUsage(afterCompression, { compressions: 1, context_used: NaN, context_max: Infinity, context_percent: 'invalid' })
+  check('mergeUsage ignores non-finite context gauges',
+    invalidContext.context_used === 20 && invalidContext.context_max === 200 && invalidContext.context_percent === 10)
+
   // accumulate: a counter that went backwards is a gateway restart, so the sample
   // re-baselines from zero and the first tokens after the reset are still charged.
   const ratesCard = { input: 2, output: 1, cache_read: 1, provider: 'opencode-go', model: 'deepseek-v4.1-flash' }
   const offPeakMs = Date.UTC(2026, 8, 16, 20, 0)
+  const ratioRates = { input: 1, output: 1, cache_read: 0 }
+  const ratioSample = (prev, prompt, pct) => suNs.accumulate(prev,
+    { prompt, output: 0, cache_hit_pct: pct }, ratioRates, offPeakMs)
+  const ratioFirst = ratioSample(null, 100, 0)
+  const ratioCached = ratioSample(ratioFirst, 100, 100)
+  const ratioUncached = ratioSample(ratioCached, 100, 0)
+  check('accumulate ratio-only flips never re-charge prompt tokens',
+    [ratioFirst, ratioCached, ratioUncached].every(s => Math.abs(s.usd - 0.0001) < 1e-12),
+    JSON.stringify([ratioFirst.usd, ratioCached.usd, ratioUncached.usd]))
+  const ratioGrowth = ratioSample(ratioSample(ratioFirst, 200, 100), 300, 50)
+  check('accumulate splits only new prompt tokens at the current ratio',
+    Math.abs(ratioGrowth.usd - 0.00015) < 1e-12 && ratioGrowth.prompt === 300 &&
+      ratioGrowth.miss === 150 && ratioGrowth.cacheRead === 150,
+    JSON.stringify(ratioGrowth))
+  const ratioReset = ratioSample(ratioGrowth, 20, 50)
+  check('accumulate charges post-reset prompt tokens at the current ratio',
+    Math.abs(ratioReset.usd - 0.00016) < 1e-12 && ratioReset.prompt === 20 &&
+      ratioReset.miss === 160 && ratioReset.cacheRead === 160,
+    JSON.stringify(ratioReset))
+  const ratioLegacy = ratioSample({ miss: 60, cacheRead: 40, output: 0, usd: 0.00006 }, 120, 50)
+  check('accumulate uses the legacy charged split as the prompt baseline',
+    Math.abs(ratioLegacy.usd - 0.00007) < 1e-12 && ratioLegacy.prompt === 120 &&
+      ratioLegacy.miss === 70 && ratioLegacy.cacheRead === 50,
+    JSON.stringify(ratioLegacy))
   const resetPrev = { miss: 1000000, cacheRead: 0, output: 0, usd: 0.5 }
   const resetNext = suNs.accumulate(resetPrev, { prompt: 1000, input: 1000, output: 0, cache_hit_pct: 0 }, ratesCard, offPeakMs, 'deepseek-v4.1-flash')
   check('accumulate re-baselines a reset counter and still charges the new tokens',
@@ -863,6 +910,41 @@ async function testSessionUsage() {
   const expectWinUsd = (36000 * 0.15 + 84000 * 0.003 + 8000 * 0.6) / 1000000
   check('Windows gateway: chip shows real value after python3 fails', winCost === '$' + expectWinUsd.toFixed(3), 'want $' + expectWinUsd.toFixed(3) + ' got ' + winCost + ' text=' + winOut.text)
   check('Windows gateway: working interpreter is cached', stored.py_cmd === 'python', 'stored=' + stored.py_cmd)
+
+  // A pricing failure is a valid response from a working interpreter.
+  const { ctx: errorCtx, contributions: errorContributions } = captureCtx()
+  let cachedPython
+  errorCtx.storage = { get: () => cachedPython, set: (_, py) => { cachedPython = py } }
+  const pricingError = 'no registry entry for ' + USAGE.model
+  let pricingReply = JSON.stringify({ ok: false, error: pricingError })
+  const priceCommands = []
+  sdk.setRpc(async (method, params) => {
+    if (method === 'session.usage') return USAGE
+    if (method === 'shell.exec') {
+      priceCommands.push(params.command)
+      return { stdout: pricingReply + '\n', stderr: '', code: 0 }
+    }
+    return {}
+  })
+  stubTimers()
+  sdk.host.state.focusedSessionId.set('sess-pricing-error')
+  sdk.host.state.focusedUsage.set(USAGE)
+  mod.register(errorCtx)
+  restoreTimers()
+  await settle()
+  const renderErrorChip = errorContributions[0].render
+  const pricingFailed = render(renderErrorChip)
+  check('Session Usage shows the pricing script error, not an interpreter error',
+    pricingFailed.text.includes(pricingError) && !pricingFailed.text.includes('no working python'), pricingFailed.text)
+  check('pricing error stops probing and caches the working interpreter',
+    priceCommands.length > 0 && priceCommands.every(cmd => cmd.startsWith('python3 ')) && cachedPython === 'python3',
+    JSON.stringify(priceCommands))
+
+  pricingReply = priceLine
+  await timers.find(t => t.ms === 120000).fn()
+  const pricingRecovered = render(renderErrorChip)
+  check('the next successful lookup clears the error and restores the estimate',
+    !pricingRecovered.text.includes(pricingError) && pricingRecovered.text.includes('$' + expectUsd.toFixed(3)), pricingRecovered.text)
   Date.now = realNow
 }
 
@@ -1893,11 +1975,112 @@ async function testSpoolTransport() {
   check('spool: the id-less descriptor reads no parts', noId.calls.filter(c => /--part \d+/.test(c)).length === 0, JSON.stringify(noId.calls))
 }
 
+async function testPythonFallback() {
+  console.log('--- stale Python cache on a Windows gateway')
+  const scriptsDir = 'C:/fixture scripts'
+  const cases = [
+    ['session-usage', 'model_price_lookup.py', { ok: true, input: 1, output: 2 }, 'Rates per 1M tokens'],
+    ['opencode-usage', 'opencode_go_usage.py', makeSnapshot(Date.now()), '12/47/6%']
+  ]
+  sdk.host.state.focusedSessionId.set(null)
+  sdk.host.state.focusedUsage.set(null)
+
+  for (const [id, script, payload, expectedText] of cases) {
+    const storage = new Map([['py_cmd', 'python']])
+    const attempts = []
+    const quotedPath = '"' + scriptsDir + '/' + script + '"'
+    sdk.setRpc(async (method, params) => {
+      if (method !== 'shell.exec') return {}
+      attempts.push(params.command)
+      return params.command === 'py -3 ' + quotedPath
+        ? { stdout: JSON.stringify(payload), code: 0 }
+        : { stdout: '', code: 127 }
+    })
+    const register = async fresh => {
+      const { mod } = await loadPlugin(id, { fresh, scriptsDir })
+      const { ctx, contributions } = captureCtx()
+      ctx.storage.get = (key, fallback) => storage.get(key) ?? fallback
+      ctx.storage.set = (key, value) => storage.set(key, value)
+      stubTimers()
+      mod.register(ctx)
+      restoreTimers()
+      await settle()
+      return contributions.find(c => c.id === 'chip')
+    }
+
+    const chip = await register(100)
+    const expected = ['python', 'python3', 'py -3'].map(py => py + ' ' + quotedPath)
+    check(id + ': stale Python falls back in order without repeating a candidate',
+      JSON.stringify(attempts) === JSON.stringify(expected), JSON.stringify(attempts))
+    const out = render(chip.render)
+    check(id + ': data renders after interpreter fallback', out.text.includes(expectedText), out.text)
+
+    attempts.length = 0
+    await register(101)
+    check(id + ': the next load starts with the replacement interpreter',
+      attempts.length === 1 && attempts[0] === expected[2], JSON.stringify(attempts))
+  }
+}
+
+async function testOpencodeRefreshRace() {
+  console.log('--- opencode-usage overlapping refreshes')
+  const before = passes
+  for (const stale of ['success', 'endpoint error', 'parse error']) {
+    const { mod } = await loadPlugin('opencode-usage', { fresh: 'race-' + stale, scriptsDir: '/tmp/hdp-test/scripts' })
+    const pending = { usage: [], models: [] }
+    sdk.setRpc((method, params) => {
+      const kind = String(params.command).includes('opencode_go_models.py') ? 'models' : 'usage'
+      return new Promise(resolve => pending[kind].push(resolve))
+    })
+    const stored = new Map()
+    const { ctx, contributions } = captureCtx()
+    ctx.storage.get = (key, fallback) => stored.get(key) ?? fallback
+    ctx.storage.set = (key, value) => stored.set(key, value)
+    stubTimers()
+    mod.register(ctx)
+    restoreTimers()
+    const refresh = contributions.find(c => c.area === 'palette' && c.data.id === 'opencodeGo.refresh').data.run
+    const page = contributions.find(c => c.area === 'routes')
+    const chip = contributions.find(c => c.id === 'chip')
+    refresh()
+    refresh()
+    const newer = makeSnapshot(Date.now())
+    newer.windows.rolling.used_percent = 23
+    const models = makeModelsPayload(Date.now())
+    models.models[0].name = 'Newer Model'
+    if (stale === 'endpoint error') {
+      models.models = []
+      models.promos = []
+    }
+    const reply = payload => ({ stdout: JSON.stringify(payload), code: 0 })
+    pending.usage[2](reply(newer))
+    pending.models[1](reply(models))
+    await settle()
+    const older = makeSnapshot(Date.now())
+    older.windows.rolling.used_percent = 81
+    const staleReply = payload => stale === 'success' ? reply(payload)
+      : stale === 'endpoint error' ? reply({ ok: false, error: 'stale endpoint failure' })
+        : { stdout: 'not JSON', code: 0 }
+    pending.usage[0](staleReply(older))
+    pending.usage[1](staleReply(older))
+    pending.models[0](staleReply(makeModelsPayload(Date.now() - 60000)))
+    await settle()
+    const out = render(page.render)
+    check('overlap ' + stale + ': newer usage wins', render(chip.render).text.includes('23/47/6%'), render(chip.render).text)
+    check('overlap ' + stale + ': newer models stay in storage', stored.get('models_v2') === models || JSON.stringify(stored.get('models_v2')) === JSON.stringify(models))
+    check('overlap ' + stale + ': stale errors are dropped', !/stale endpoint failure|Gateway call failed/.test(out.text), out.text.slice(0, 250))
+    check('overlap ' + stale + ': newer models stay in state', stale === 'endpoint error' ? !/Promo Model/.test(out.text) : /Newer Model/.test(out.text))
+  }
+  console.log('overlapping refresh regression: ' + (passes - before) + '/12 passed')
+}
+
 // ---------------------------------------------------------------------------
 await testDeepseekRate()
 await testSessionUsage()
 await testOpencodeUsage()
 await testSpoolTransport()
+await testPythonFallback()
+await testOpencodeRefreshRace()
 await proveOracle()
 
 console.log('\n' + passes + ' passed, ' + fails + ' failed')
