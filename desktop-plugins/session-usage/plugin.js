@@ -122,16 +122,15 @@ function fmtReleaseDate(raw) {
 
 // ---- Cost estimation --------------------------------------------------------
 
-// Rates come from the gateway (models.dev registry cache) as $ per 1M tokens.
-// The same payload carries the matched entry's registry release_date, which
-// stands on its own: an entry may publish a date and no cost card at all.
-function parseRates(stdout) {
+// A pricing result can be a lookup error, a release date, or rates per 1M tokens.
+function parsePriceResult(stdout) {
   const lines = String(stdout || '').split('\n').map(l => l.trim()).filter(Boolean)
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     if (!lines[i].startsWith('{')) continue
     try {
       const parsed = JSON.parse(lines[i])
-      if (!parsed || parsed.ok !== true) return null
+      if (parsed?.ok === false) return parsed
+      if (parsed?.ok !== true) return null
       const priced = Number.isFinite(parsed.input) && Number.isFinite(parsed.output)
       const dated = typeof parsed.released === 'string'
       return priced || dated ? parsed : null
@@ -469,7 +468,7 @@ export default {
           const stdout = resp && resp.stdout ? String(resp.stdout) : ''
           const code = resp && typeof resp.code === 'number' ? resp.code : 0
           lastCode = code
-          const parsed = parseRates(stdout)
+          const parsed = parsePriceResult(stdout)
           if (code === 0 && parsed) {
             if (ctx.storage && typeof ctx.storage.set === 'function' && py !== cached) {
               ctx.storage.set('py_cmd', py)
@@ -489,7 +488,11 @@ export default {
       if (ratesFor === want) return
       try {
         const parsed = await runPriceScript(want)
-        ratesFor = parsed ? want : null
+        if (!parsed.ok) {
+          const message = typeof parsed.error === 'string' && parsed.error.replace(/\s+/g, ' ').trim()
+          throw new Error(message || 'Pricing lookup failed')
+        }
+        ratesFor = want
         ratesData.set(parsed)
         ratesError.set(null)
       } catch (e) {
