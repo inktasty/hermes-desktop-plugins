@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """OpenCode Go model list + prices + monthly caps, for the desktop usage plugin.
 
-Three sources, merged into ONE line of JSON on stdout:
+Four sources, merged into ONE line of JSON on stdout:
 
-  1. GET {GO_BASE}/models          -- the models THIS key is served (the authoritative list),
-     from the console's documented endpoint (https://opencode.ai/inference/go/v1/models)
-  2. https://opencode.ai/v2/docs/console/go -- per-model prices, monthly caps, estimated
-     request counts, tier notes (peak/off-peak, >256K) and any promotion labels; fetched
-     as markdown through content negotiation (the old /docs/go.md path 404s)
-  3. https://models.opencode.ai/api.json -- the live catalog, used to cross-check (2)'s
-     prices and to price models (2) has not listed yet. Cached on disk with a 12h TTL and
+  1. GET {GO_BASE}/models          -- the documented model list API
+     (https://opencode.ai/inference/go/v1/models): every Go model with its prices,
+     long-context and peak-hour pricing, monthly usage limit per plan, and training/ZDR
+     flags. With a key it lists the models that key's workspace can use; without one,
+     every public Go model. This is the authoritative source for the table.
+  2. https://opencode.ai/v2/docs/console/go -- the data-retention table and its per-model
+     notes, the window share rules, and any per-model tables the page still carries
+     (prices, caps, request estimates, promotion labels); fetched as markdown through
+     content negotiation (the old /docs/go.md path 404s)
+  3. https://models.opencode.ai/api.json -- the live catalog, used to cross-check the
+     prices and to price models when (1) is unreachable. Cached on disk with a 12h TTL and
      ETag revalidation; falls back to the stale cache, then to the models.dev registry
      cache, when the network is down.
   4. the local models.dev registry cache (HERMES_HOME/models_dev_cache.json), which
@@ -298,23 +302,118 @@ def promo_label(raw):
 # ------------------------------------------------------------- API + catalog ---
 
 def api_models():
-    """[{id}] the key is served, plus the base URL it came from."""
+    """{id: endpoint_entry} from the Go model list API, plus the base URL it came from,
+    an error string, and whether the list was the key's own (True) or the public one.
+
+    The key is optional on this endpoint: with one the list is the models its
+    workspace can use, without one (or when the keyed request fails) every public Go
+    model, which still carries the same prices, limits and privacy flags.
+    """
     base = (env_value(BASE_ENV) or DEFAULT_GO_BASE).rstrip("/")
     key = gateway_key()
-    if not key:
-        return None, base, "no OpenCode Go key found (checked the credential pool and .env)"
-    try:
-        raw, _ = http_get(base + "/models", {"Authorization": "Bearer " + key})
-        payload = json.loads(text_of(raw))
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        return None, base, "model list request failed: " + str(exc)
-    data = payload.get("data") if isinstance(payload, dict) else None
-    if not isinstance(data, list):
-        return None, base, "model list response had no data array"
-    ids = [str(item.get("id")) for item in data if isinstance(item, dict) and item.get("id")]
-    if not ids:
-        return None, base, "model list was empty"
-    return sorted(ids), base, None
+    error = None
+    attempts = ([{"Authorization": "Bearer " + key}] if key else []) + [{}]
+    for headers in attempts:
+        try:
+            raw, _ = http_get(base + "/models", headers)
+            payload = json.loads(text_of(raw))
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            error = "model list request failed: " + str(exc)
+            continue
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, list):
+            error = "model list response had no data array"
+            continue
+        entries = {
+            str(item["id"]): endpoint_entry(item)
+            for item in data
+            if isinstance(item, dict) and item.get("id")
+        }
+        if not entries:
+            error = "model list was empty"
+            continue
+        return dict(sorted(entries.items())), base, error, bool(headers)
+    return None, base, error, False
+
+
+def _cache_price(cache, field):
+    """A cache price: a number, or a {ttl: price} map whose first (shortest) TTL wins."""
+    value = (cache or {}).get(field)
+    if isinstance(value, dict):
+        value = next(iter(value.values()), None)
+    return as_float(value) if value is not None else None
+
+
+_DAY_NAMES = {"mon": "Mon", "tue": "Tue", "wed": "Wed", "thu": "Thu", "fri": "Fri", "sat": "Sat", "sun": "Sun"}
+
+
+def describe_when(when):
+    """A short label for a pricing condition: '> 256K tokens', 'peak hours', 'from 2026-12-01'."""
+    when = when if isinstance(when, dict) else {}
+    context = (when.get("context") or {}).get("gt") if isinstance(when.get("context"), dict) else None
+    if isinstance(context, (int, float)):
+        return "> %gK tokens" % (context / 1000) if context >= 1000 else "> %g tokens" % context
+    date = when.get("date") if isinstance(when.get("date"), dict) else None
+    if date and date.get("gte"):
+        return "from " + str(date["gte"])
+    if "utc_days" in when or "utc_hours" in when or "any" in when:
+        return "peak hours"
+    return "conditional"
+
+
+def endpoint_entry(item):
+    """One model list item, slimmed to what the table reads.
+
+    `cost.text` holds the base card; `overrides` (long-context prices) and
+    `cost.multipliers` (peak hours, scheduled price changes) become `tiers`.
+    """
+    cost = item.get("cost") if isinstance(item.get("cost"), dict) else {}
+    text = cost.get("text") if isinstance(cost.get("text"), dict) else {}
+    inp = text.get("input") if isinstance(text.get("input"), dict) else {}
+    out = text.get("output") if isinstance(text.get("output"), dict) else {}
+    base = {
+        "input": as_float(inp.get("price")) if inp.get("price") is not None else None,
+        "output": as_float(out.get("price")) if out.get("price") is not None else None,
+        "cache_read": _cache_price(inp.get("cache"), "read"),
+        "cache_write": _cache_price(inp.get("cache"), "write"),
+    }
+
+    tiers = []
+    out_overrides = [o for o in (out.get("overrides") or []) if isinstance(o, dict)]
+    for index, override in enumerate(o for o in (inp.get("overrides") or []) if isinstance(o, dict)):
+        paired = out_overrides[index] if index < len(out_overrides) else {}
+        tiers.append({
+            "label": describe_when(override.get("when")),
+            "input": as_float(override.get("price")) if override.get("price") is not None else None,
+            "output": as_float(paired.get("price")) if paired.get("price") is not None else None,
+            "cache_read": _cache_price(override.get("cache"), "read"),
+            "cache_write": _cache_price(override.get("cache"), "write"),
+        })
+    for multiplier in cost.get("multipliers") or []:
+        factor = as_float((multiplier or {}).get("factor")) if isinstance(multiplier, dict) else None
+        if not factor:
+            continue
+        tiers.append(dict(
+            {"label": "%s (%gx)" % (describe_when(multiplier.get("when")), factor)},
+            **{field: (value * factor if value is not None else None) for field, value in base.items()}
+        ))
+
+    go = item.get("go") if isinstance(item.get("go"), dict) else {}
+    usage = go.get("monthly_usage")
+    monthly = None
+    if isinstance(usage, dict):
+        monthly = {plan: as_float(value) for plan, value in usage.items() if as_float(value) is not None} or None
+    limit = item.get("limit") if isinstance(item.get("limit"), dict) else {}
+    release = item.get("release_date")
+    return dict(base, **{
+        "name": item.get("name") or item.get("id"),
+        "context": limit.get("context"),
+        "released": release.strip() if isinstance(release, str) and release.strip() else None,
+        "monthly_usage": monthly,
+        "zdr": go.get("zdr") if isinstance(go.get("zdr"), bool) else None,
+        "training": go.get("training") if isinstance(go.get("training"), bool) else None,
+        "tiers": tiers,
+    })
 
 
 def fetch_catalog():
@@ -623,8 +722,12 @@ def plan_info(markdown):
     text = re.sub(r"\s+", " ", TAG_RE.sub(" ", LINK_RE.sub(r"\1", markdown)))
     price = re.search(r"\*\*\$(\d+(?:\.\d+)?)/month", text) or re.search(r"\$(\d+(?:\.\d+)?)\s*(?:/|per\s+)month", text)
     intro = re.search(r"\$(\d+(?:\.\d+)?)\s*(?:for|your first month|first month)", text)
-    five = re.search(r"5-hour\s*(?:—|-|:)\s*(\d+)% of the monthly limit", text)
-    weekly = re.search(r"weekly\s*(?:—|-|:)\s*(\d+)%", text)
+    # "5-hour — 20% of the monthly limit" (older page) or
+    # "The **5-hour limit** is 20% of your monthly allowance" (current page).
+    five = (re.search(r"5-hour\s*(?:—|-|:)\s*(\d+)% of the monthly limit", text)
+            or re.search(r"5-hour limit\W*is\s+(\d+)%", text, re.I))
+    weekly = (re.search(r"weekly\s*(?:—|-|:)\s*(\d+)%", text)
+              or re.search(r"weekly limit\W*is\s+(\d+)%", text, re.I))
     notes = []
     for line in markdown.splitlines():
         bullet = re.match(r"\s*-\s+\*\*([^*]+?):\*\*\s*(.+?)\s*$", line)
@@ -662,27 +765,30 @@ def price_check(docs_tier, catalog_entry):
 def parse_privacy(markdown):
     """{norm(name): {training, retention, zdr, note_key}} + {note_key: {label, text}}.
 
-    The docs carry a Privacy table (model training + data retention) with
-    per-model footnotes; both feed the ZDR column in the plugin.
+    The docs carry a Privacy table (data retention, plus model training on older
+    pages) with per-model footnotes; both feed the ZDR column in the plugin.
+    `training` is None when the table has no training column.
     """
     rows, notes = {}, {}
     if not markdown:
         return rows, notes
     for block in table_blocks(markdown):
         header = " ".join(block[0]).lower()
-        if "model training" not in header or "data retention" not in header:
+        if "data retention" not in header:
             continue
+        has_training = "model training" in header
+        width = 3 if has_training else 2
         for cells in block[1:]:
-            if len(cells) < 3:
+            if len(cells) < width:
                 continue
             name = strip_tags(cells[0]).strip()
-            training = strip_tags(cells[1]).strip()
-            retention = strip_tags(cells[2]).replace("\\", "").strip()
+            training = strip_tags(cells[1]).strip() if has_training else None
+            retention = strip_tags(cells[width - 1]).replace("\\", "").strip()
             key = norm(name)
             if not key:
                 continue
             rows[key] = {
-                "training": "used" if training.lower().startswith("yes") else "not_used",
+                "training": None if training is None else ("used" if training.lower().startswith("yes") else "not_used"),
                 "retention": retention,
                 "zdr": retention.lower().startswith("0"),
                 "note_key": None,
@@ -722,9 +828,10 @@ def announcement_for(model_id):
     return None
 
 
-def build_model(model_id, docs, catalog, privacy=None, notes=None, releases=None):
+def build_model(model_id, docs, catalog, privacy=None, notes=None, releases=None, endpoint=None):
     entry = docs.get(norm(model_id))
     catalog_entry = catalog.get(model_id) or {}
+    listed = (endpoint or {}).get(model_id)
     tier = default_tier(entry) if entry else {}
     record = {
         "id": model_id,
@@ -735,13 +842,14 @@ def build_model(model_id, docs, catalog, privacy=None, notes=None, releases=None
         "cache_write": tier.get("cache_write"),
         "monthly_usd": (entry or {}).get("monthly_usd"),
         "monthly_before_usd": (entry or {}).get("monthly_before_usd"),
+        "monthly_by_plan": None,
         "req_5h": (entry or {}).get("req_5h"),
         "req_week": (entry or {}).get("req_week"),
         "req_month": (entry or {}).get("req_month"),
-        "context": catalog_entry.get("context"),
+        "context": (listed or {}).get("context") or catalog_entry.get("context"),
         # models.dev registry release date, null when the registry has none: the
         # key is always present so the payload shape stays stable.
-        "released": release_for(model_id, releases or {}),
+        "released": release_for(model_id, releases or {}) or (listed or {}).get("released"),
         # The per-model badge carries the SAME expiry gate as the top-of-page
         # promo list: a label whose end date has passed ships as None here, so a
         # dead offer cannot survive as a row badge either. A label with no
@@ -766,7 +874,24 @@ def build_model(model_id, docs, catalog, privacy=None, notes=None, releases=None
             for alt in (alternate_tiers(entry) if entry else [])
         ],
     }
-    if not entry and catalog_entry:
+    if listed:
+        # The model list API is OpenCode's own per-model record: it outranks the
+        # docs tables (when the page has any) and the catalog.
+        record.update({field: listed.get(field) for field in ("input", "output", "cache_read", "cache_write")})
+        record.update({
+            "name": listed.get("name") or record["name"],
+            "price_source": "api",
+            "price_check": price_check(listed, catalog_entry),
+        })
+        if listed.get("tiers"):
+            record["tiers"] = listed["tiers"]
+        usage = listed.get("monthly_usage") or {}
+        record["monthly_by_plan"] = usage or None
+        if usage.get("go") is not None:
+            record["monthly_usd"] = usage["go"]
+            record["monthly_before_usd"] = None
+            record["cap_source"] = "api"
+    elif not entry and catalog_entry:
         # The docs have no row yet: price it from the live catalog and say so.
         record.update({
             "input": catalog_entry.get("input"),
@@ -779,13 +904,19 @@ def build_model(model_id, docs, catalog, privacy=None, notes=None, releases=None
 
     privacy = privacy or {}
     notes = notes or {}
-    row = privacy.get(norm(model_id))
-    if row:
+    row = privacy.get(norm(model_id)) or privacy.get(norm(record["name"]))
+    flags = listed or {}
+    if row or flags.get("zdr") is not None:
+        row = row or {}
+        zdr = flags["zdr"] if flags.get("zdr") is not None else row.get("zdr")
+        training = row.get("training")
+        if flags.get("training") is not None:
+            training = "used" if flags["training"] else "not_used"
         record["privacy"] = {
-            "training": row["training"],
-            "retention": row["retention"],
-            "zdr": row["zdr"],
-            "note_key": row["note_key"],
+            "training": training,
+            "retention": row.get("retention") or ("0 days" if zdr else "Not ZDR"),
+            "zdr": zdr,
+            "note_key": row.get("note_key"),
         }
     else:
         record["privacy"] = None
@@ -800,7 +931,7 @@ def build_model(model_id, docs, catalog, privacy=None, notes=None, releases=None
             "ends": announcement.get("ends"),
             "cap_usd": announcement["cap_usd"],
         }
-        if announcement["cap_usd"] is not None:
+        if announcement["cap_usd"] is not None and record.get("cap_source") != "api":
             # Announced by OpenCode, not in the docs: take the cap and label it.
             record["monthly_usd"] = announcement["cap_usd"]
             record["monthly_before_usd"] = None
@@ -813,7 +944,8 @@ def build_model(model_id, docs, catalog, privacy=None, notes=None, releases=None
 def sort_models(records):
     def key(record):
         cap = record.get("monthly_usd")
-        return (0 if (record.get("in_docs") and cap is not None) else 1,
+        published = record.get("in_docs") or record.get("price_source") == "api"
+        return (0 if (published and cap is not None) else 1,
                 -(cap or 0),
                 str(record.get("name") or "").lower())
     return sorted(records, key=key)
@@ -905,7 +1037,7 @@ def emit(payload):
 
 def main():
     errors = []
-    ids, base, api_error = api_models()
+    endpoint, base, api_error, api_authed = api_models()
     if api_error:
         errors.append(api_error)
 
@@ -921,15 +1053,15 @@ def main():
     if catalog_error:
         errors.append(catalog_error)
 
-    if ids:
-        served = ids
+    if endpoint:
+        served = list(endpoint)
     else:
-        # No key or no API answer: fall back to the live catalog so the table still works.
+        # No API answer: fall back to the live catalog so the table still works.
         served = sorted(catalog)
 
     releases = registry_index()
     records = [
-        build_model(model_id, docs, catalog, privacy, privacy_notes, releases)
+        build_model(model_id, docs, catalog, privacy, privacy_notes, releases, endpoint)
         for model_id in served
     ]
     served_keys = set(norm(model_id) for model_id in served)
@@ -984,7 +1116,10 @@ def main():
         ],
         "docs_only": doc_only,
         "sources": {
-            "api": bool(ids),
+            "api": bool(endpoint),
+            # False when the list is the public one (no key, or the keyed request
+            # failed), so it may include models this workspace cannot use.
+            "api_keyed": api_authed,
             "docs": bool(markdown),
             "catalog": bool(catalog),
             "catalog_age_s": round(catalog_age, 1) if catalog_age is not None else None,

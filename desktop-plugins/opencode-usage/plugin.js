@@ -914,7 +914,18 @@ export function ModelsTable({ models, error, initialControls }) {
         children: [fmtCap(m.monthly_usd), superMark('*')]
       }
     }
-    return { right: true, children: fmtCap(m.monthly_usd) }
+    return { right: true, title: planCapsTitle(m.monthly_by_plan), children: fmtCap(m.monthly_usd) }
+  }
+
+  // The model list API publishes a limit per plan; the column shows Go's, the
+  // tooltip names all of them.
+  function planCapsTitle(byPlan) {
+    if (!byPlan) return undefined
+    const names = { go: 'Go', 'go-plus': 'Go Plus', 'go-teams': 'Go Teams' }
+    const parts = Object.keys(byPlan)
+      .filter(plan => byPlan[plan] != null)
+      .map(plan => (names[plan] || plan) + ' ' + fmtCap(byPlan[plan]))
+    return parts.length ? 'Monthly limit: ' + parts.join(' · ') : undefined
   }
 
   // ZDR: 0d for zero retention, the retention window compacted otherwise, a dash
@@ -1151,7 +1162,9 @@ export function ModelsTable({ models, error, initialControls }) {
         className: 'flex flex-col gap-1 text-[0.625rem] text-(--ui-text-quaternary)',
         children: [
           jsx('div', {
-            children: 'Prices and caps from the OpenCode Go docs, cross-checked against the live catalog. '
+            children: (payload.sources && payload.sources.api
+              ? 'Prices, caps and ZDR from the OpenCode Go model list, cross-checked against the live catalog. '
+              : 'Prices and caps from the OpenCode Go docs, cross-checked against the live catalog. ')
               + (payload.counts ? payload.counts.catalog_mismatch + ' of ' + payload.counts.served + ' prices differ.' : '')
           }),
           payload.plan && (payload.plan.five_hour_share != null || payload.plan.weekly_share != null)

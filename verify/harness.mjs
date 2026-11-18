@@ -291,6 +291,7 @@ function makeModelsPayload(now) {
         name: 'Promo Model',
         input: 0.15, output: 0.6, cache_read: 0.003,
         monthly_usd: 60, monthly_before_usd: 15,
+        monthly_by_plan: { go: 60, 'go-plus': 180, 'go-teams': 65 },
         req_5h: 26000, req_week: 65000, req_month: 130000,
         context: 1000000,
         promo: '4x · Ends Sep 27',
@@ -929,6 +930,10 @@ async function testOpencodeUsage() {
   check('page shows promo badge label', /4x · Ends Sep 27/.test(pageOut.text), pageOut.text)
   check('page shows catalog-priced dagger', /†/.test(pageOut.text), pageOut.text)
   check('page shows difference count', /1 of 7 prices differ/.test(pageOut.text), pageOut.text)
+  check('footer names the model list as the source when the API answered',
+    /Prices, caps and ZDR from the OpenCode Go model list/.test(pageOut.text), pageOut.text)
+  check('cap tooltip lists the per-plan monthly limits',
+    pageOut.titles.includes('Monthly limit: Go $60 · Go Plus $180 · Go Teams $65'), JSON.stringify(pageOut.titles))
   check('page shows uncapped group header', /Also served by Go, no published cap/.test(pageOut.text), pageOut.text)
   // `col-span-8` is a class the app never compiles (Tailwind scans the app's own
   // sources, never plugin files), so the divider spans with an inline style.
