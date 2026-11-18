@@ -1634,7 +1634,7 @@ export default {
       }).join('') : ''
       for (const py of candidates) {
         try {
-          // A scripts dir containing a space (C:/Users/John Smith/...,
+          // A scripts dir containing a space (C:/Users/John Smith/..., privacy: allow=home -- fictional space-containing path
           // ~/Library/Application Support/...) otherwise splits into two argv tokens
           // and the failure reads as a missing python instead of a bad path.
           // shellQuote picks the form the GATEWAY's shell needs, which is not
