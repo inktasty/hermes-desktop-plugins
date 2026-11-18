@@ -33,8 +33,12 @@ jobs:
         run: |
           if [ "$EVENT" = pull_request ]; then
             range="$PR_BASE..$PR_HEAD"
-          elif [ "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-            range="$BEFORE..$GITHUB_SHA"
+          elif [ "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH" ]; then
+            if git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+              range="$BEFORE..$GITHUB_SHA"
+            else
+              range="$GITHUB_SHA^!"
+            fi
           else
             range="origin/$DEFAULT_BRANCH..$GITHUB_SHA"
           fi
