@@ -161,7 +161,7 @@ function loadAllowlist() {
 // ---- run ---------------------------------------------------------------------
 
 function main() {
-  const strict = process.argv.includes('--strict') || process.env.CLASS_AUDIT_STRICT === '1'
+  const strict = Boolean(process.env.CI) || process.argv.includes('--strict') || process.env.CLASS_AUDIT_STRICT === '1'
   // An explicitly-set-but-absent DESKTOP_SRC is a configuration error, not the
   // no-source-here case, and fails in either mode.
   const srcWasSet = Boolean(process.env.DESKTOP_SRC)
