@@ -960,7 +960,7 @@ async function testOpencodeUsage() {
   check('the released column no longer comes from a month table', !source.includes('MONTH_ABBR'), source.slice(0, 60))
   check('a model with no registry date is a dash that says why',
     pageOut.titles.includes('not in the model registry, so it has no published release date'), JSON.stringify(pageOut.titles))
-  check('the stored models payload key was bumped for the new column', source.includes("'models_v2'") && !source.includes("'models_v1'"), source.slice(0, 60))
+  check('the stored models payload key was bumped for the API-sourced caps and ZDR', source.includes("'models_v3'") && !source.includes("'models_v2'"), source.slice(0, 60))
 
   // ZDR column (Part B)
   check('ZDR cell for a zero-retention model reads 0d', /\b0d\b/.test(pageOut.text), pageOut.text)
@@ -1498,9 +1498,9 @@ async function testOpencodeUsage() {
   // says it is -- a two-hour-old cache must never report 'just now'.
   const freshMod = (await loadPlugin('opencode-usage', { fresh: 3, scriptsDir: '/tmp/hdp-test/scripts' })).mod
   const stalePayload = makeModelsPayload(Date.now() - 2 * 3600000)
-  // The live storage key: a payload cached before the Released column existed
-  // lives under models_v1 and is deliberately ignored.
-  const restored = { models_v2: stalePayload }
+  // The live storage key: a payload cached before caps and ZDR came from the
+  // model list lives under models_v2 and is deliberately ignored.
+  const restored = { models_v3: stalePayload }
   const { ctx: freshCtx, contributions: freshContributions } = captureCtx()
   freshCtx.storage = {
     get: (k, f) => (k in restored ? restored[k] : f),

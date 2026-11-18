@@ -1738,7 +1738,7 @@ export default {
 
     // Storage key v2: the payload gained the per-model `released` date, so a v1
     // cache would render a column of dashes for up to the 6h TTL. Ignore it.
-    const storedModels = ctx.storage && typeof ctx.storage.get === 'function' ? ctx.storage.get('models_v2') : null
+    const storedModels = ctx.storage && typeof ctx.storage.get === 'function' ? ctx.storage.get('models_v3') : null
     if (storedModels && typeof storedModels === 'object' && storedModels.models) {
       $models.set(storedModels)
       // Refetch guard only: the table's 'updated <age>' and 'Fetched at' lines read
@@ -1777,7 +1777,7 @@ export default {
         $modelsAt.set(Date.now())
         $modelsError.set(null)
         if (ctx.storage && typeof ctx.storage.set === 'function') {
-          ctx.storage.set('models_v2', payload)
+          ctx.storage.set('models_v3', payload)
         }
       } catch (e) {
         $modelsError.set('Gateway call failed: ' + (e && e.message ? e.message : String(e)) + FAILURE_HINT)
