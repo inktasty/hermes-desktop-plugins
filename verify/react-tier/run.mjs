@@ -69,6 +69,11 @@ async function mountAndTest(name, test, canonicalStats = false) {
   let failRpc = false
   let sessionPayload = { ...SESSION_PAYLOAD }
   let statsPayload = { ...STATS_PAYLOAD }
+  const pendingPrices = []
+  if (canonicalStats === 'race') {
+    state.focusedSessionId.set('synthetic-race')
+    statsPayload.provider = 'synthetic-alpha'
+  }
   sdk.setRpc(async (method, params) => {
     calls.push({ method, params })
     if (failRpc) throw new Error('synthetic offline')
@@ -78,6 +83,9 @@ async function mountAndTest(name, test, canonicalStats = false) {
     }
     if (method === 'session.usage') return { ...sessionPayload }
     if (name === 'session-usage' && canonicalStats) {
+      if (canonicalStats === 'race') {
+        return new Promise(resolve => pendingPrices.push({ command: params.command, resolve }))
+      }
       const input = canonicalStats === 'providers'
         ? params.command.includes("'synthetic-alpha'") ? 2 : params.command.includes("'synthetic-beta'") ? 5 : 7
         : PRICE_PAYLOAD.input
@@ -101,6 +109,7 @@ async function mountAndTest(name, test, canonicalStats = false) {
       container,
       state,
       calls,
+      pendingPrices,
       beforeMountTimers,
       failRpc: () => { failRpc = true },
       setSessionPayload: next => { sessionPayload = next },
@@ -201,6 +210,32 @@ async function testSessionProviders({ container, state, setStatsPayload }) {
   console.log('provider focus regression: ' + (passes - before) + '/3 passed')
 }
 
+async function testSessionRateRace({ container, calls, pendingPrices }) {
+  const before = passes
+  const sessionReplies = pendingPrices.filter(p => p.command.includes("'synthetic-alpha'"))
+  check('rate race starts focused stats and configured lookup',
+    calls.filter(c => c.method === 'session.stats').length === 2 &&
+    pendingPrices.some(p => !p.command.includes("'synthetic-model'")))
+  await settle(() => sessionReplies.forEach(p => p.resolve({ code: 0, stdout: JSON.stringify(PRICE_PAYLOAD) })))
+  await settle(() => container.querySelector('button').dispatchEvent(
+    new dom.window.FocusEvent('focusin', { bubbles: true })
+  ))
+  check('rate race session reply shows rate block', container.textContent.includes('Rates per 1M tokens'))
+  const estimate = container.querySelector('button').textContent
+  await settle(() => pendingPrices.filter(p => !sessionReplies.includes(p)).forEach(p => p.resolve({
+    code: 0, stdout: JSON.stringify({ ...PRICE_PAYLOAD, model: 'synthetic-configured', input: 7 })
+  })))
+  check('rate race late configured reply preserves active rate block', container.textContent.includes('Rates per 1M tokens'))
+  check('rate race late configured reply preserves saved estimate', container.querySelector('button').textContent === estimate)
+  const count = calls.filter(c => c.method === 'shell.exec').length
+  const poll = [...timers.values()].find(t => t.ms === 120000)
+  await settle(() => { void poll.fn() })
+  check('rate race unchanged session does not refetch price', calls.filter(c => c.method === 'shell.exec').length === count)
+  check('rate race deduplicates pending session lookups', sessionReplies.length === 1)
+  await settle(() => pendingPrices.forEach(p => p.resolve({ code: 0, stdout: JSON.stringify(PRICE_PAYLOAD) })))
+  console.log('rate race regression: ' + (passes - before) + '/6 passed')
+}
+
 async function testOpencodeUsage({ container, calls, beforeMountTimers, failRpc }) {
   check('opencode-usage mount effect fetches models', calls.some(c => (
     c.params?.command?.includes('opencode_go_models')
@@ -227,6 +262,7 @@ await mountAndTest('deepseek-rate', testDeepseekRate)
 await mountAndTest('session-usage', testSessionUsage)
 await mountAndTest('session-usage', testSessionStatsPolling, true)
 await mountAndTest('session-usage', testSessionProviders, 'providers')
+await mountAndTest('session-usage', testSessionRateRace, 'race')
 await mountAndTest('opencode-usage', testOpencodeUsage)
 globalThis.setInterval = originalInterval
 globalThis.clearInterval = originalClear

@@ -467,10 +467,9 @@ export default {
   register(ctx) {
     const sessData = atom({})   // merged usage map: { [sid]: usage }
     const fetchedAt = atom({})  // fetched time map: { [sid]: time }
-    const ratesData = atom(null) // { input, output, cache_read, provider, model } from the gateway
-    const ratesError = atom(null) // last script-run diagnostic, visible in the panel
+    const ratesData = atom({}) // provider/model key -> { rates, error }
+    const pendingRates = new Map()
     const costData = atom({})   // { [sid]: { usd, peak, provider, model, ... } } estimated spend
-    let ratesFor = null         // provider/model pair the cached rates belong to
     let usageMethod = null
 
     // Rates are per 1M tokens, read from the gateway's model registry cache
@@ -517,32 +516,35 @@ export default {
       return JSON.stringify([String(model || '').trim(), String(provider || '').trim()])
     }
 
-    async function loadRates(model, provider) {
+    function loadRates(model, provider) {
       const want = String(model || '').trim()
       const providerId = String(provider || '').trim()
       const key = ratesKey(want, providerId)
-      if (ratesFor === key) return
-      try {
-        const parsed = await runPriceScript(providerId ? [want, providerId] : want ? [want] : [])
-        if (!parsed.ok) {
-          const message = typeof parsed.error === 'string' && parsed.error.replace(/\s+/g, ' ').trim()
-          throw new Error(message || 'Pricing lookup failed')
+      if (ratesData.get()[key]?.rates) return Promise.resolve()
+      if (pendingRates.has(key)) return pendingRates.get(key)
+      const pending = (async () => {
+        try {
+          const parsed = await runPriceScript(providerId ? [want, providerId] : want ? [want] : [])
+          if (!parsed.ok) {
+            const message = typeof parsed.error === 'string' && parsed.error.replace(/\s+/g, ' ').trim()
+            throw new Error(message || 'Pricing lookup failed')
+          }
+          ratesData.set({ ...ratesData.get(), [key]: { rates: parsed, error: null } })
+        } catch (e) {
+          ratesData.set({ ...ratesData.get(), [key]: { rates: null, error: e && e.message ? e.message : String(e) } })
+        } finally {
+          pendingRates.delete(key)
         }
-        ratesFor = key
-        ratesData.set(parsed)
-        ratesError.set(null)
-      } catch (e) {
-        ratesFor = null
-        ratesData.set(null)
-        ratesError.set(e && e.message ? e.message : String(e))
-      }
+      })()
+      pendingRates.set(key, pending)
+      return pending
     }
 
     // Persist the running estimate so each new chunk of tokens is priced at the
     // card in effect when it was spent (see accumulate()).
     function trackCost(sid, usage) {
-      const rates = ratesData.get()
-      if (!sid || !usage || !rates || ratesFor !== ratesKey(usage.model, usage.provider)) return
+      const rates = usage && ratesData.get()[ratesKey(usage.model, usage.provider)]?.rates
+      if (!sid || !usage || !rates) return
       const prev = costData.get()[sid] || null
       const next = accumulate(prev, usage, rates, Date.now(), usage.model)
       if (!next) return
@@ -594,7 +596,6 @@ export default {
       const sessMap = useValue(sessData)
       const timesMap = useValue(fetchedAt)
       const loadedRates = useValue(ratesData)
-      const ratesErr = useValue(ratesError)
       const costs = useValue(costData)
       const focusValue = useValue(FOCUS_ATOM)
       const sid = focusValue || ACTIVE_ATOM.get()
@@ -610,7 +611,9 @@ export default {
       const live = useValue(USAGE_ATOM)
 
       const u = mergeUsage(sess, live)
-      const rates = !u.model || ratesFor === ratesKey(u.model, u.provider) ? loadedRates : null
+      const rateEntry = loadedRates[u.model ? ratesKey(u.model, u.provider) : ratesKey()]
+      const rates = rateEntry?.rates || null
+      const ratesErr = rateEntry?.error || null
 
       const [open, setOpen] = useState(false)
 
