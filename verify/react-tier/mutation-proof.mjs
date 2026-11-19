@@ -9,6 +9,12 @@ const repo = path.resolve(here, '../..')
 const mutations = [
   ['deepseek-rate', 'useValue(MODEL_ATOM)', 'useValue(atom(MODEL_ATOM.get()))'],
   ['session-usage', 'useEffect(() => {\n        fetchOnce()\n      }, [sid])', 'useEffect(() => {}, [sid])'],
+  ['session-usage', 'const timer = setInterval(fetchOnce, POLL_MS)', [
+    'const timer = setInterval(() => {',
+    '      clearInterval(timer)',
+    '      return fetchOnce()',
+    '    }, POLL_MS)'
+  ].join('\n')],
   ['opencode-usage', 'onClick: () => setOpen(v => !v)', 'onClick: () => {}'],
   ['opencode-usage', [
     'useEffect(() => {',
@@ -45,5 +51,5 @@ for (const [name, before, after] of mutations) {
     fs.rmSync(scratch, { recursive: true, force: true })
   }
 }
-console.log('\nmutation-proof: ' + (failed ? 'FAIL' : 'PASS (all four mutants rejected only by real React)'))
+console.log('\nmutation-proof: ' + (failed ? 'FAIL' : 'PASS (all five mutants rejected only by real React)'))
 process.exitCode = failed ? 1 : 0

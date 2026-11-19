@@ -14,6 +14,10 @@ const source = process.env.PLUGIN_SRC
   : fileURLToPath(new URL('../../desktop-plugins/', import.meta.url))
 const SESSION_PAYLOAD = { model: 'synthetic-model', total_tokens: 100, dev_credits_spent_micros: 2500000 }
 const MODELS_PAYLOAD = { ok: true, models: [] }
+const STATS_PAYLOAD = {
+  model: 'synthetic-model', input_tokens: 100000, prompt_tokens: 100000, total_tokens: 100000
+}
+const PRICE_PAYLOAD = { ok: true, model: 'synthetic-model', input: 1, output: 1, cache_read: 1 }
 const USAGE_PAYLOAD = {
   ok: true,
   windows: {
@@ -49,7 +53,7 @@ const settle = fn => act(async () => {
   for (let i = 0; i < 30; i++) await Promise.resolve()
 })
 
-async function mountAndTest(name, test) {
+async function mountAndTest(name, test, canonicalStats = false) {
   const entries = []
   const disposers = []
   const container = document.createElement('div')
@@ -63,10 +67,17 @@ async function mountAndTest(name, test) {
   const baseline = [...sdk.atoms].reduce((n, a) => n + a.listenerCount, 0)
   const calls = []
   let failRpc = false
+  let sessionPayload = { ...SESSION_PAYLOAD }
+  let statsPayload = { ...STATS_PAYLOAD }
   sdk.setRpc(async (method, params) => {
     calls.push({ method, params })
     if (failRpc) throw new Error('synthetic offline')
-    if (method === 'session.usage') return { ...SESSION_PAYLOAD }
+    if (method === 'session.stats') {
+      if (!canonicalStats) throw new Error('synthetic unknown method: session.stats')
+      return { ...statsPayload }
+    }
+    if (method === 'session.usage') return { ...sessionPayload }
+    if (name === 'session-usage' && canonicalStats) return { code: 0, stdout: JSON.stringify(PRICE_PAYLOAD) }
     const payload = params.command.includes('opencode_go_models') ? MODELS_PAYLOAD : USAGE_PAYLOAD
     return { code: 0, stdout: JSON.stringify(payload) }
   })
@@ -81,7 +92,15 @@ async function mountAndTest(name, test) {
     const entry = entries.find(e => e.id === (name === 'opencode-usage' ? 'page' : 'chip'))
     const beforeMountTimers = timers.size
     await settle(() => root.render(createElement(entry.render)))
-    await test({ container, state, calls, beforeMountTimers, failRpc: () => { failRpc = true } })
+    await test({
+      container,
+      state,
+      calls,
+      beforeMountTimers,
+      failRpc: () => { failRpc = true },
+      setSessionPayload: next => { sessionPayload = next },
+      setStatsPayload: next => { statsPayload = next }
+    })
     await settle(() => root.unmount())
     check(name + ' unmount cleans React subscriptions/timers', timers.size === beforeMountTimers)
   } catch (error) {
@@ -96,6 +115,9 @@ async function teardown(name, disposers, baseline, container) {
   await settle(() => disposers.forEach(fn => fn()))
   const listeners = [...sdk.atoms].reduce((n, a) => n + a.listenerCount, 0)
   check(name + ' dispose cleans all timers/listeners', timers.size === 0 && listeners === baseline)
+  if (name === 'session-usage') {
+    check('session-usage unmount/dispose clears registration poll', ![...timers.values()].some(t => t.ms === 120000))
+  }
   timers.clear()
   container.remove()
 }
@@ -112,7 +134,7 @@ async function testDeepseekRate({ container, state, failRpc }) {
   check('deepseek-rate failed poll stays neutral', badge().dataset.variant === neutral)
 }
 
-async function testSessionUsage({ container, state, calls, failRpc }) {
+async function testSessionUsage({ container, state, calls, failRpc, setSessionPayload }) {
   check('session-usage empty chip', container.querySelector('button').textContent === 'usage')
   await settle(() => state.focusedSessionId.set('synthetic-session'))
   check('session-usage focus effect fetches new session', calls.some(c => (
@@ -127,9 +149,40 @@ async function testSessionUsage({ container, state, calls, failRpc }) {
     new dom.window.FocusEvent('focusout', { bubbles: true })
   ))
   check('session-usage blur state closes panel', !container.querySelector('[data-prim="PopoverContent"]'))
+  const poll = [...timers.values()].find(t => t.ms === 120000)
+  const beforePoll = calls.filter(c => c.method === 'session.usage').length
+  setSessionPayload({ ...SESSION_PAYLOAD, dev_credits_spent_micros: 3500000 })
+  await settle(() => poll.fn())
+  check('session-usage legacy poll fetches again', (
+    calls.filter(c => c.method === 'session.usage').length === beforePoll + 1
+  ))
+  check('session-usage legacy poll repaints chip', container.querySelector('button').textContent === '$3.50')
+  check('session-usage legacy poll stays armed', [...timers.values()].includes(poll))
   failRpc()
   await settle(() => state.focusedSessionId.set('synthetic-failure'))
   check('session-usage failed fetch leaves empty chip', container.querySelector('button').textContent === 'usage')
+}
+
+async function testSessionStatsPolling({ container, state, calls, setStatsPayload, failRpc }) {
+  await settle(() => state.focusedSessionId.set('synthetic-stats'))
+  const chip = () => container.querySelector('button').textContent
+  check('session-usage canonical stats initializes chip', chip() === '$0.100', chip())
+  const poll = [...timers.values()].find(t => t.ms === 120000)
+  const beforePoll = calls.filter(c => c.method === 'session.stats').length
+  setStatsPayload({ ...STATS_PAYLOAD, input_tokens: 200000, prompt_tokens: 200000, total_tokens: 200000 })
+  await settle(() => poll.fn())
+  check('session-usage canonical poll fetches again', (
+    calls.filter(c => c.method === 'session.stats').length === beforePoll + 1
+  ))
+  check('session-usage canonical poll avoids legacy RPC', !calls.some(c => c.method === 'session.usage'))
+  check('session-usage canonical poll repaints chip', chip() === '$0.200', chip())
+  check('session-usage canonical poll stays armed', [...timers.values()].includes(poll))
+  setStatsPayload({ ...STATS_PAYLOAD, input_tokens: 0, prompt_tokens: 0, total_tokens: 0 })
+  await settle(() => poll.fn())
+  check('session-usage empty poll keeps accumulated cost', chip() === '$0.200', chip())
+  failRpc()
+  await settle(() => poll.fn())
+  check('session-usage failed poll keeps accumulated cost', chip() === '$0.200', chip())
 }
 
 async function testOpencodeUsage({ container, calls, beforeMountTimers, failRpc }) {
@@ -156,6 +209,7 @@ async function testOpencodeUsage({ container, calls, beforeMountTimers, failRpc 
 }
 await mountAndTest('deepseek-rate', testDeepseekRate)
 await mountAndTest('session-usage', testSessionUsage)
+await mountAndTest('session-usage', testSessionStatsPolling, true)
 await mountAndTest('opencode-usage', testOpencodeUsage)
 globalThis.setInterval = originalInterval
 globalThis.clearInterval = originalClear
