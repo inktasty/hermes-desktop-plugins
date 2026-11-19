@@ -77,7 +77,12 @@ async function mountAndTest(name, test, canonicalStats = false) {
       return { ...statsPayload }
     }
     if (method === 'session.usage') return { ...sessionPayload }
-    if (name === 'session-usage' && canonicalStats) return { code: 0, stdout: JSON.stringify(PRICE_PAYLOAD) }
+    if (name === 'session-usage' && canonicalStats) {
+      const input = canonicalStats === 'providers'
+        ? params.command.includes("'synthetic-alpha'") ? 2 : params.command.includes("'synthetic-beta'") ? 5 : 7
+        : PRICE_PAYLOAD.input
+      return { code: 0, stdout: JSON.stringify({ ...PRICE_PAYLOAD, input }) }
+    }
     const payload = params.command.includes('opencode_go_models') ? MODELS_PAYLOAD : USAGE_PAYLOAD
     return { code: 0, stdout: JSON.stringify(payload) }
   })
@@ -185,6 +190,17 @@ async function testSessionStatsPolling({ container, state, calls, setStatsPayloa
   check('session-usage failed poll keeps accumulated cost', chip() === '$0.200', chip())
 }
 
+async function testSessionProviders({ container, state, setStatsPayload }) {
+  const before = passes
+  for (const [provider, cost] of [['synthetic-alpha', '$0.200'], ['synthetic-beta', '$0.500'], ['', '$0.700']]) {
+    setStatsPayload({ ...STATS_PAYLOAD, provider })
+    await settle(() => state.focusedSessionId.set('synthetic-provider-' + (provider || 'default')))
+    check('session provider focus uses correct rate: ' + (provider || 'configured'),
+      container.querySelector('button').textContent === cost, container.textContent)
+  }
+  console.log('provider focus regression: ' + (passes - before) + '/3 passed')
+}
+
 async function testOpencodeUsage({ container, calls, beforeMountTimers, failRpc }) {
   check('opencode-usage mount effect fetches models', calls.some(c => (
     c.params?.command?.includes('opencode_go_models')
@@ -210,6 +226,7 @@ async function testOpencodeUsage({ container, calls, beforeMountTimers, failRpc 
 await mountAndTest('deepseek-rate', testDeepseekRate)
 await mountAndTest('session-usage', testSessionUsage)
 await mountAndTest('session-usage', testSessionStatsPolling, true)
+await mountAndTest('session-usage', testSessionProviders, 'providers')
 await mountAndTest('opencode-usage', testOpencodeUsage)
 globalThis.setInterval = originalInterval
 globalThis.clearInterval = originalClear

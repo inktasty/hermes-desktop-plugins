@@ -169,7 +169,7 @@ def main() -> None:
     # (a Windows gateway's cmd.exe keeps single quotes literal), so that a quoting
     # mistake upstream degrades to a correct lookup instead of an empty registry hit.
     model = (argv[0] if len(argv) > 0 else "").strip().strip("'\"")
-    provider = (argv[1] if len(argv) > 1 else "").strip()
+    provider = (argv[1] if len(argv) > 1 else "").strip().strip("'\"")
     if not (model and provider):
         cfg_model, cfg_provider = config_model_provider()
         model = model or cfg_model

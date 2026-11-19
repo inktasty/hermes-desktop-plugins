@@ -192,6 +192,7 @@ function usageFromStats(stats) {
   if (!stats || !Number.isFinite(stats.total_tokens)) throw new Error('Invalid session.stats response')
   const usage = {
     model: stats.model || '',
+    provider: stats.provider || '',
     input: stats.input_tokens || stats.prompt_tokens || 0,
     output: stats.output_tokens || stats.completion_tokens || 0,
     reasoning: stats.reasoning_tokens || 0,
@@ -300,6 +301,7 @@ function mergeUsage(polled, live) {
   // cache_hit_pct is a ratio, not a counter: take the latest value, never max.
   if (Number.isFinite(live.cache_hit_pct)) base.cache_hit_pct = live.cache_hit_pct
   if (typeof live.model === 'string' && live.model) base.model = live.model
+  if (typeof live.provider === 'string' && live.provider) base.provider = live.provider
   if (Number.isFinite(live.dev_credits_spent_micros)) base.dev_credits_spent_micros = live.dev_credits_spent_micros
   if (typeof live.active_subagents === 'number') base.active_subagents = live.active_subagents
   return base
@@ -468,7 +470,7 @@ export default {
     const ratesData = atom(null) // { input, output, cache_read, provider, model } from the gateway
     const ratesError = atom(null) // last script-run diagnostic, visible in the panel
     const costData = atom({})   // { [sid]: { usd, peak, provider, model, ... } } estimated spend
-    let ratesFor = null         // model id the cached rates belong to
+    let ratesFor = null         // provider/model pair the cached rates belong to
     let usageMethod = null
 
     // Rates are per 1M tokens, read from the gateway's model registry cache
@@ -491,7 +493,7 @@ export default {
           // quoted the same way rather than concatenated raw: it comes from the
           // usage payload, so an odd character must not reach the shell unquoted.
           const quotedPath = shellQuote(scriptPath)
-          const quotedArgs = args ? ' ' + shellQuote(args) : ''
+          const quotedArgs = args.map(arg => ' ' + shellQuote(arg)).join('')
           const resp = await host.request('shell.exec', { command: py + ' ' + quotedPath + quotedArgs })
           const stdout = resp && resp.stdout ? String(resp.stdout) : ''
           const code = resp && typeof resp.code === 'number' ? resp.code : 0
@@ -511,16 +513,22 @@ export default {
       throw new Error('no working python on the gateway shell (tried ' + tried + ')' + (lastCode != null ? '; exit ' + lastCode : '') + '; run install.sh on the gateway')
     }
 
-    async function loadRates(model) {
+    function ratesKey(model, provider) {
+      return JSON.stringify([String(model || '').trim(), String(provider || '').trim()])
+    }
+
+    async function loadRates(model, provider) {
       const want = String(model || '').trim()
-      if (ratesFor === want) return
+      const providerId = String(provider || '').trim()
+      const key = ratesKey(want, providerId)
+      if (ratesFor === key) return
       try {
-        const parsed = await runPriceScript(want)
+        const parsed = await runPriceScript(providerId ? [want, providerId] : want ? [want] : [])
         if (!parsed.ok) {
           const message = typeof parsed.error === 'string' && parsed.error.replace(/\s+/g, ' ').trim()
           throw new Error(message || 'Pricing lookup failed')
         }
-        ratesFor = want
+        ratesFor = key
         ratesData.set(parsed)
         ratesError.set(null)
       } catch (e) {
@@ -534,7 +542,7 @@ export default {
     // card in effect when it was spent (see accumulate()).
     function trackCost(sid, usage) {
       const rates = ratesData.get()
-      if (!sid || !usage || !rates) return
+      if (!sid || !usage || !rates || ratesFor !== ratesKey(usage.model, usage.provider)) return
       const prev = costData.get()[sid] || null
       const next = accumulate(prev, usage, rates, Date.now(), usage.model)
       if (!next) return
@@ -570,7 +578,7 @@ export default {
           // Await the rates BEFORE pricing: trackCost() reads whatever card is
           // cached, so pricing first would charge this session's opening
           // sample to the previously loaded model's rates.
-          if (merged.model) await loadRates(merged.model)
+          if (merged.model) await loadRates(merged.model, merged.provider)
           trackCost(sid, merged)
         }
       } catch (e) {
@@ -585,7 +593,7 @@ export default {
     function SessionChip() {
       const sessMap = useValue(sessData)
       const timesMap = useValue(fetchedAt)
-      const rates = useValue(ratesData)
+      const loadedRates = useValue(ratesData)
       const ratesErr = useValue(ratesError)
       const costs = useValue(costData)
       const focusValue = useValue(FOCUS_ATOM)
@@ -602,6 +610,7 @@ export default {
       const live = useValue(USAGE_ATOM)
 
       const u = mergeUsage(sess, live)
+      const rates = !u.model || ratesFor === ratesKey(u.model, u.provider) ? loadedRates : null
 
       const [open, setOpen] = useState(false)
 
