@@ -5,10 +5,11 @@
 #   ./uninstall.sh /path/to/desktop-plugins # point it at the app folder directly
 #   HERMES_HOME=/opt/hermes ./uninstall.sh  # non-default gateway home
 #
-# This is the inverse of install.sh: it removes the plugin folders from the app's
-# desktop-plugins directory and the three scripts from the gateway's scripts
-# directory. It writes no config and touches nothing else -- in particular it does
-# not remove code the plugins did not install.
+# This is the inverse of install.sh: it removes each plugin's plugin.js (and its
+# folder, once empty) from the app's desktop-plugins directory and the three
+# scripts from the gateway's scripts directory. It writes no config and touches
+# nothing else -- in particular it does not remove files the plugins did not
+# install, even inside a plugin folder.
 set -euo pipefail
 
 # Gateway home defaults per OS. HERMES_HOME is always the gateway's home, never
@@ -31,13 +32,23 @@ DEST=${1:-$DEFAULT_DEST}
 
 removed=0
 for id in $PLUGIN_IDS; do
-  target="$DEST/$id"
-  if [[ -d "$target" ]]; then
-    rm -rf "$target"
+  # install.sh puts exactly one file in each plugin folder; remove that file, and
+  # the folder only once nothing else is left in it.
+  dir="$DEST/$id"
+  target="$dir/plugin.js"
+  if [[ -f "$target" ]]; then
+    rm -f "$target"
     echo "removed $target"
     removed=$((removed + 1))
   else
     echo "absent  $target"
+  fi
+  if [[ -d "$dir" ]]; then
+    if rmdir "$dir" 2>/dev/null; then
+      echo "removed $dir"
+    else
+      echo "kept    $dir (it holds files install.sh did not put there)"
+    fi
   fi
 done
 
