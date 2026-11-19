@@ -1,0 +1,10 @@
+{
+  "name": "hermes-plugins-react-tier",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "jsdom": "31.0.1"
+  }
+}

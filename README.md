@@ -202,6 +202,8 @@ PLUGIN_SRC=../desktop-plugins node harness.mjs
 $env:PLUGIN_SRC='../desktop-plugins'; node harness.mjs
 ```
 
+The isolated real-React lifecycle tier runs effects, atom subscriptions, state updates and cleanup in jsdom (also in CI): `cd verify/react-tier && npm ci && TZ=UTC node run.mjs` (Node 22.22.2+).
+
 It also sweeps all 192 hours of an 8-day window against an independently
 written peak-tier oracle and checks the tooltip against the viewer's own
 timezone, so run it under more than one `TZ` to see the tooltip follow the zone.
