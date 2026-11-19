@@ -223,6 +223,63 @@ async function testOpencodeUsage({ container, calls, beforeMountTimers, failRpc 
   await settle(() => refresh.click())
   check('opencode-usage RPC error reaches DOM', container.textContent.includes('Gateway call failed'))
 }
+async function testRestoredModels(label, fetchedAt, shouldRefresh, failRefresh = false) {
+  const entries = []
+  const disposers = []
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  const baseline = [...sdk.atoms].reduce((n, a) => n + a.listenerCount, 0)
+  const cached = {
+    ok: true,
+    models: [{ id: 'synthetic-cached', name: 'Synthetic cached model', input: 1 }],
+    ...(fetchedAt === undefined ? {} : { fetched_at: fetchedAt })
+  }
+  let modelCalls = 0
+  let finishRefresh
+  sdk.setRpc(async (method, params) => {
+    if (params?.command?.includes('opencode_go_models')) {
+      modelCalls++
+      return new Promise(resolve => { finishRefresh = resolve })
+    }
+    return { code: 0, stdout: JSON.stringify(USAGE_PAYLOAD) }
+  })
+  try {
+    const url = pathToFileURL(path.join(source, 'opencode-usage/plugin.js'))
+    url.searchParams.set('restored', label)
+    const plugin = (await import(url)).default
+    await settle(() => plugin.register({
+      register: e => entries.push(e),
+      registerMany: es => entries.push(...es),
+      onDispose: fn => disposers.push(fn),
+      storage: { get: key => key === 'models_v3' ? cached : null, set() {} }
+    }))
+    await settle(() => root.render(createElement(entries.find(e => e.id === 'page').render)))
+    check('restored models ' + label + ' refresh decision', modelCalls === (shouldRefresh ? 1 : 0), 'model calls=' + modelCalls)
+    check('restored models ' + label + ' keeps cached list visible', container.textContent.includes('Synthetic cached model'))
+    if (finishRefresh) {
+      await settle(() => finishRefresh({ code: 0, stdout: JSON.stringify(failRefresh
+        ? { ok: false, error: 'synthetic models failure' }
+        : { ...cached, fetched_at: new Date().toISOString() }) }))
+      check('restored models ' + label + ' keeps list after refresh', container.textContent.includes('Synthetic cached model'))
+      if (failRefresh) {
+        check('restored models failure reaches DOM', container.textContent.includes('synthetic models failure'))
+      } else {
+        await settle(() => [...timers.values()].filter(t => t.ms === 60000).forEach(t => t.fn()))
+        check('restored models ' + label + ' refreshes exactly once', modelCalls === 1)
+      }
+    }
+  } finally {
+    await settle(() => root.unmount())
+    await teardown('restored models ' + label, disposers, baseline, container)
+  }
+}
+
+await testRestoredModels('expired', new Date(Date.now() - 7 * 3600000).toISOString(), true)
+await testRestoredModels('fresh', new Date(Date.now() - 3600000).toISOString(), false)
+await testRestoredModels('missing timestamp', undefined, true)
+await testRestoredModels('invalid timestamp', 'not-a-date', true)
+await testRestoredModels('failed refresh', new Date(Date.now() - 7 * 3600000).toISOString(), true, true)
 await mountAndTest('deepseek-rate', testDeepseekRate)
 await mountAndTest('session-usage', testSessionUsage)
 await mountAndTest('session-usage', testSessionStatsPolling, true)
