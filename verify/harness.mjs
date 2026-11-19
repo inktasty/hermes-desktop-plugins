@@ -581,6 +581,56 @@ async function testSessionUsage() {
   }
   const priceLine = JSON.stringify({ ok: true, provider: 'opencode-go', model: 'deepseek-v4.1-flash', input: 0.15, output: 0.6, cache_read: 0.003 })
 
+  {
+    const before = passes
+    const { mod: providerMod } = await loadPlugin('session-usage', { fresh: 'provider-pricing', scriptsDir: '/synthetic/scripts' })
+    const commands = []
+    let provider = 'synthetic-alpha'
+    let offline = false
+    sdk.host.state.focusedSessionId.set('synthetic-alpha-session')
+    sdk.host.state.focusedUsage.set(null)
+    sdk.setRpc(async (method, params) => {
+      if (method === 'session.stats') return { model: 'synthetic-model', provider, input_tokens: 1000000, total_tokens: 1000000 }
+      if (method === 'shell.exec') {
+        commands.push(params.command)
+        if (offline) throw new Error('synthetic offline')
+        const selected = params.command.includes("'synthetic-alpha'") ? 'synthetic-alpha'
+          : params.command.includes("'synthetic-beta'") ? 'synthetic-beta' : 'synthetic-configured'
+        return { code: 0, stdout: JSON.stringify({ ok: true, model: 'synthetic-model', provider: selected,
+          input: selected === 'synthetic-alpha' ? 2 : selected === 'synthetic-beta' ? 5 : 7, output: 1 }) }
+      }
+      return {}
+    })
+    const { ctx, contributions } = captureCtx()
+    stubTimers()
+    providerMod.register(ctx)
+    const poll = timers.find(t => t.ms === 120000).fn
+    restoreTimers()
+    await settle(12)
+    await poll()
+    check('provider pricing: session provider overrides configured provider',
+      commands.some(c => c.endsWith("'synthetic-model' 'synthetic-alpha'")) && render(contributions[0].render).text.includes('$2.00'))
+    provider = 'synthetic-beta'
+    sdk.host.state.focusedSessionId.set('synthetic-beta-session')
+    await poll()
+    check('provider pricing: same model on another provider gets its own rate',
+      commands.some(c => c.endsWith("'synthetic-model' 'synthetic-beta'")) && render(contributions[0].render).text.includes('$5.00'))
+    const cachedCount = commands.length
+    await poll()
+    check('provider pricing: same provider and model reuses cache', commands.length === cachedCount)
+    provider = ''
+    sdk.host.state.focusedSessionId.set('synthetic-default-session')
+    await poll()
+    check('provider pricing: absent provider falls back to configuration',
+      commands.length > cachedCount && render(contributions[0].render).text.includes('$7.00'))
+    provider = 'synthetic-unavailable'
+    offline = true
+    sdk.host.state.focusedSessionId.set('synthetic-unavailable-session')
+    await poll()
+    check('provider pricing: failed lookup does not reuse another provider rate', !render(contributions[0].render).text.includes('$7.00'))
+    console.log('provider pricing regression: ' + (passes - before) + '/5 passed')
+  }
+
   // Functional tests run against an installed copy so the SCRIPTS_DIR token is
   // resolved the same way install.sh resolves it.
   const { mod, ns: suNs } = await loadPlugin('session-usage', { fresh: 1, scriptsDir: '/tmp/hdp-test/scripts' })
