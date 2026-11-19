@@ -1742,9 +1742,7 @@ export default {
     const storedModels = ctx.storage && typeof ctx.storage.get === 'function' ? ctx.storage.get('models_v3') : null
     if (storedModels && typeof storedModels === 'object' && storedModels.models) {
       $models.set(storedModels)
-      // Refetch guard only: the table's 'updated <age>' and 'Fetched at' lines read
-      // the payload's own fetched_at, so a restored list shows its real age.
-      $modelsAt.set(Date.now() - 60 * 1000)
+      $modelsAt.set(parseMs(storedModels.fetched_at))
     }
 
     let usageGeneration = 0
