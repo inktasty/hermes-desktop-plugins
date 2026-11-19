@@ -3,7 +3,7 @@
 // independently written peak-tier oracle.
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createHash } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
 import * as sdk from '@hermes/plugin-sdk'
@@ -11,6 +11,10 @@ import { jsx } from 'react/jsx-runtime'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const CANON = process.env.PLUGIN_SRC || path.join(HERE, '..', 'desktop-plugins')
+const COPIES = fs.mkdtempSync(path.join(HERE, '.harness-'))
+process.on('exit', () => fs.rmSync(COPIES, { recursive: true, force: true }))
+process.once('SIGINT', () => process.exit(130))
+process.once('SIGTERM', () => process.exit(143))
 
 let fails = 0
 let passes = 0
@@ -156,8 +160,7 @@ function restoreTimers() {
 
 async function loadPlugin(id, { fresh = 0, scriptsDir = null } = {}) {
   const src = path.join(CANON, id, 'plugin.js')
-  const copy = path.join(HERE, id + '.plugin.js')
-  const copyFresh = fresh ? path.join(HERE, id + '.plugin.' + fresh + '.js') : copy
+  const copyFresh = path.join(COPIES, id + '.plugin' + (fresh ? '.' + fresh : '') + '.js')
   fs.copyFileSync(src, copyFresh)
   let source = fs.readFileSync(copyFresh, 'utf8')
   const bad = unsupportedImports(source, ['@hermes/plugin-sdk', 'react', 'react/jsx-runtime'])
@@ -175,7 +178,7 @@ async function loadPlugin(id, { fresh = 0, scriptsDir = null } = {}) {
   // `ns` is the whole module namespace, not just the default export: the
   // opencode-usage probes reach its two exported control helpers and the table
   // component through it.
-  const ns = await import('./' + id + '.plugin' + (fresh ? '.' + fresh : '') + '.js')
+  const ns = await import(pathToFileURL(copyFresh).href)
   return { bad, canonHash, localHash, mod: ns.default, ns, source, installed: Boolean(scriptsDir) }
 }
 
