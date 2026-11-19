@@ -50,6 +50,30 @@ class GatewayScriptTests(unittest.TestCase):
 
     # -- env_lookup ---------------------------------------------------------
 
+    def test_price_main_strips_quoted_provider_argument(self):
+        cache = {
+            provider: {"models": {"synthetic-model": {"cost": {"input": rate, "output": rate}}}}
+            for provider, rate in (("synthetic-alpha", 2), ("synthetic-beta", 5))
+        }
+        cache_path = self.home / "quoted_provider_cache.json"
+        cache_path.write_text(json.dumps(cache), encoding="utf-8")
+        original_cache, original_argv = self.price.CACHE, sys.argv
+        try:
+            self.price.CACHE = cache_path
+            for quote in ("'", '"'):
+                with self.subTest(quote=quote):
+                    sys.argv = ["model_price_lookup.py", "synthetic-model", quote + "synthetic-beta" + quote]
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        self.price.main()
+                    result = json.loads(output.getvalue())
+                    self.assertTrue(result["ok"])
+                    self.assertEqual(result["requested_provider"], "synthetic-beta")
+                    self.assertEqual(result["provider"], "synthetic-beta")
+                    self.assertEqual(result["input"], 5)
+        finally:
+            self.price.CACHE, sys.argv = original_cache, original_argv
+
     def test_env_lookup_handles_bom_quotes_export_and_comment(self):
         env = self.home / ".env"
         env.write_text(
