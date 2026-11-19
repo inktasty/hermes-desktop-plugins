@@ -9,7 +9,18 @@ const repo = path.resolve(here, '../..')
 const mutations = [
   ['deepseek-rate', 'useValue(MODEL_ATOM)', 'useValue(atom(MODEL_ATOM.get()))'],
   ['session-usage', 'useEffect(() => {\n        fetchOnce()\n      }, [sid])', 'useEffect(() => {}, [sid])'],
-  ['opencode-usage', 'onClick: () => setOpen(v => !v)', 'onClick: () => {}']
+  ['opencode-usage', 'onClick: () => setOpen(v => !v)', 'onClick: () => {}'],
+  ['opencode-usage', [
+    'useEffect(() => {',
+    '    const check = () => {',
+    '      if (pageStale($updatedAt.get(), Date.now())) void refresh()',
+    '      if ($modelsAt.get() == null || Date.now() - $modelsAt.get() > MODELS_TTL_MS) void refreshModels()',
+    '    }',
+    '    check()',
+    '    const timer = setInterval(check, PAGE_RECHECK_MS)',
+    '    return () => clearInterval(timer)',
+    '  }, [])'
+  ].join('\n'), 'useEffect(() => {}, [])']
 ]
 let failed = false
 for (const [name, before, after] of mutations) {
@@ -34,5 +45,5 @@ for (const [name, before, after] of mutations) {
     fs.rmSync(scratch, { recursive: true, force: true })
   }
 }
-console.log('\nmutation-proof: ' + (failed ? 'FAIL' : 'PASS (all three mutants rejected only by real React)'))
+console.log('\nmutation-proof: ' + (failed ? 'FAIL' : 'PASS (all four mutants rejected only by real React)'))
 process.exitCode = failed ? 1 : 0
