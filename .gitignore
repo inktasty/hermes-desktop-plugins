@@ -1,5 +1,6 @@
 verify/*.plugin.js
 verify/*.plugin.*.js
+verify/.harness-*/
 # scratch copies the probes generate and import (e.g. verify/opencode-usage.e2e.gen.js)
 verify/*.gen.js
 # Only the five tracked stub files under verify/node_modules ship; a real npm install
