@@ -178,9 +178,10 @@ described above, which works on every provider.
 
 ## Uninstall
 
-`uninstall.sh` is the inverse of `install.sh`: it removes the three plugin folders
-from the app's `desktop-plugins/` directory and the three scripts from the
-gateway's `scripts/` directory. It writes no config and touches nothing else.
+`uninstall.sh` is the inverse of `install.sh`: it removes each plugin's `plugin.js`
+from the app's `desktop-plugins/` directory, plus the plugin folder once it is
+empty, and the three scripts from the gateway's `scripts/` directory. It writes no
+config and touches nothing else: a plugin folder holding other files is kept.
 
 ```bash
 ./uninstall.sh                      # app plugin folder defaults per-OS
@@ -188,7 +189,7 @@ gateway's `scripts/` directory. It writes no config and touches nothing else.
 HERMES_HOME=/opt/hermes ./uninstall.sh
 ```
 
-Remove only the app-side plugin folder and the gateway scripts it installed; a
+It removes only the app-side plugin files and the gateway scripts it installed; a
 chip disappears after **Reload desktop plugins** from the command palette.
 
 With a remote gateway, run it on each machine, from that machine's clone:
@@ -196,9 +197,9 @@ With a remote gateway, run it on each machine, from that machine's clone:
 - **Gateway machine:** `./uninstall.sh` (or `HERMES_HOME=/opt/hermes ./uninstall.sh`)
   removes the scripts, plus the plugin copies `install.sh` left there.
 - **App machine (Windows):** `./uninstall.sh` from Git Bash removes the plugin
-  folders under `%LOCALAPPDATA%\hermes\desktop-plugins\`; its gateway-script
+  files under `%LOCALAPPDATA%\hermes\desktop-plugins\`; its gateway-script
   lines print `absent`, since the scripts live on the gateway. Without Git Bash,
-  delete the three `<id>` folders there by hand.
+  delete `plugin.js` from the three `<id>` folders there by hand.
 
 ## Verify before trusting it
 
