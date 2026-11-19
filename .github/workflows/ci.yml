@@ -10,6 +10,15 @@ on:
   pull_request:
 
 jobs:
+  windows-deploy:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy assertions (PowerShell)
+        run: pwsh -NoProfile -File verify/deploy-windows.test.ps1
+      - name: Deploy assertions (Windows PowerShell 5.1)
+        run: powershell -NoProfile -File verify/deploy-windows.test.ps1
+
   privacy:
     runs-on: ubuntu-latest
     steps:
