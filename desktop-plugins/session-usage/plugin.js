@@ -188,6 +188,33 @@ function tokensOf(u) {
   return { prompt, output, cacheRead, miss: Math.max(0, prompt - cacheRead) }
 }
 
+function usageFromStats(stats) {
+  if (!stats || !Number.isFinite(stats.total_tokens)) throw new Error('Invalid session.stats response')
+  const usage = {
+    model: stats.model || '',
+    input: stats.input_tokens || stats.prompt_tokens || 0,
+    output: stats.output_tokens || stats.completion_tokens || 0,
+    reasoning: stats.reasoning_tokens || 0,
+    prompt: stats.prompt_tokens || 0,
+    completion: stats.completion_tokens || 0,
+    total: stats.total_tokens || 0,
+    calls: stats.api_calls || 0
+  }
+  const used = stats.last_prompt_tokens || 0
+  const maximum = stats.context_length || 0
+  if (used && maximum) {
+    usage.context_used = Math.min(used, maximum)
+    usage.context_max = maximum
+    usage.context_percent = Math.max(0, Math.min(100, Math.round(usage.context_used / maximum * 100)))
+  }
+  if (stats.context_source != null) usage.compressions = stats.compression_count || 0
+  if (stats.prompt_tokens > 0 && stats.cache_read_tokens > 0) {
+    usage.cache_hit_pct = Math.max(0, Math.min(100, Math.round(stats.cache_read_tokens / stats.prompt_tokens * 100)))
+  }
+  if (Number.isFinite(stats.active_subagents)) usage.active_subagents = stats.active_subagents
+  return usage
+}
+
 function costOf(miss, cacheRead, output, card) {
   return (miss * card.input + cacheRead * card.cacheRead + output * card.output) / 1000000
 }
@@ -442,6 +469,7 @@ export default {
     const ratesError = atom(null) // last script-run diagnostic, visible in the panel
     const costData = atom({})   // { [sid]: { usd, peak, provider, model, ... } } estimated spend
     let ratesFor = null         // model id the cached rates belong to
+    let usageMethod = null
 
     // Rates are per 1M tokens, read from the gateway's model registry cache
     // (Hermes's own estimator cannot price providers like opencode-go).
@@ -518,7 +546,18 @@ export default {
       const sid = focusedSid()
       if (!sid) return
       try {
-        const resp = await host.request('session.usage', { session_id: sid })
+        let resp
+        if (usageMethod === 'session.usage') {
+          resp = await host.request('session.usage', { session_id: sid })
+        } else {
+          try {
+            resp = usageFromStats(await host.request('session.stats', { session_id: sid }))
+            usageMethod = 'session.stats'
+          } catch (e) {
+            resp = await host.request('session.usage', { session_id: sid })
+            if (resp && typeof resp === 'object') usageMethod = 'session.usage'
+          }
+        }
         if (resp && typeof resp === 'object') {
           delete resp.credits_lines // nous-balance owns credits display
           const curMap = sessData.get()

@@ -726,6 +726,72 @@ async function testSessionUsage() {
       qNs.shellQuote("/tmp/it's scripts/a.py"))
   }
 
+  console.log('--- session-usage canonical stats polling (no live event)')
+  {
+    const { mod: statsMod } = await loadPlugin('session-usage', { fresh: 'canonical-stats', scriptsDir: '/tmp/hdp-test/scripts' })
+    const methods = []
+    const stats = {
+      ...Object.fromEntries(['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens',
+        'prompt_tokens', 'completion_tokens', 'total_tokens', 'reasoning_tokens', 'api_calls',
+        'last_prompt_tokens', 'context_tokens', 'context_length', 'config_context_length',
+        'compression_count', 'last_turn_tokens', 'active_subagents'].map(key => [key, 0])),
+      input_tokens: 120000, prompt_tokens: 120000, output_tokens: 8000, completion_tokens: 8000,
+      total_tokens: 128000, cache_read_tokens: 84000, api_calls: 12,
+      last_prompt_tokens: 42000, context_length: 100000, context_source: 'provider_usage',
+      compression_count: 2, model: USAGE.model, provider: 'synthetic',
+      avg_latency_s: null, tokens_per_s: null, rate_limit: null, fallback_model: null
+    }
+    sdk.host.state.focusedSessionId.set('sess-canonical-stats')
+    sdk.host.state.focusedUsage.set(null)
+    sdk.setRpc(async (method, params) => {
+      methods.push({ method, params })
+      if (method === 'session.usage') throw Object.assign(new Error('unknown method: session.usage — not available on this Hermes backend'), { code: -32601 })
+      if (method === 'session.stats') return stats
+      if (method === 'shell.exec') return { stdout: priceLine + '\n', stderr: '', code: 0 }
+      return {}
+    })
+    const { ctx: statsCtx, contributions: statsContrib } = captureCtx()
+    stubTimers()
+    Date.now = () => Date.UTC(2026, 8, 16, 20, 0)
+    statsMod.register(statsCtx)
+    const statsPoll = timers.find(t => t.ms === 120000).fn
+    restoreTimers()
+    await settle(12)
+    const statsOut = render(statsContrib[0].render)
+    const expected = (36000 * 0.15 + 84000 * 0.003 + 8000 * 0.6) / 1000000
+    check('canonical stats poll: model, tokens, calls and context without live event',
+      statsOut.text.includes(USAGE.model) && /Input tokens/.test(statsOut.text) && /API calls 12/.test(statsOut.text) && /Context used 42%/.test(statsOut.text), statsOut.text)
+    check('canonical stats poll: cost estimated from normalized cache tokens', statsOut.text.includes('$' + expected.toFixed(3)), statsOut.text)
+    check('canonical stats poll: session_id request', methods.some(x => x.method === 'session.stats' && x.params.session_id === 'sess-canonical-stats'), JSON.stringify(methods))
+    await statsPoll()
+    check('canonical stats poll: no legacy round-trip', methods.filter(x => x.method === 'session.stats').length === 2 && !methods.some(x => x.method === 'session.usage'), JSON.stringify(methods))
+    console.log('    canonical stats poll: model/tokens/calls/context, estimated cost and RPC routing checked')
+  }
+  for (const mode of ['legacy', 'empty', 'error']) {
+    const { mod: pollMod } = await loadPlugin('session-usage', { fresh: 'poll-' + mode, scriptsDir: '/tmp/hdp-test/scripts' })
+    const methods = []
+    sdk.host.state.focusedSessionId.set('sess-poll-' + mode)
+    sdk.host.state.focusedUsage.set(null)
+    sdk.setRpc(async method => {
+      methods.push(method)
+      if (method === 'shell.exec') return { stdout: priceLine + '\n', stderr: '', code: 0 }
+      if (method === 'session.stats') throw Object.assign(new Error('unknown method'), { code: -32601 })
+      if (mode === 'error') throw new Error('offline')
+      return mode === 'empty' ? null : USAGE
+    })
+    const { ctx: pollCtx, contributions: pollContrib } = captureCtx()
+    stubTimers()
+    pollMod.register(pollCtx)
+    const poll = timers.find(t => t.ms === 120000).fn
+    restoreTimers()
+    await settle(12)
+    await poll()
+    const pollOut = render(pollContrib[0].render)
+    check('stats fallback ' + mode + ': renders without live event', !pollOut.err && (mode === 'legacy' ? /API calls 12/.test(pollOut.text) : /No turns yet/.test(pollOut.text)), pollOut.text)
+    if (mode === 'legacy') check('stats fallback legacy: working method cached', methods.filter(m => m === 'session.stats').length === 1 && methods.filter(m => m === 'session.usage').length === 2, JSON.stringify(methods))
+    console.log('    stats fallback ' + mode + ': checked')
+  }
+
   // Baseline case with default Linux-style python3 success
   sdk.setRpc(async (method, params) => {
     if (method === 'session.usage') return USAGE
