@@ -673,7 +673,13 @@ async function testSessionUsage() {
     sdk.host.state.focusedSessionId.set('synthetic-unavailable-session')
     await poll()
     check('provider pricing: failed lookup does not reuse another provider rate', !render(contributions[0].render).text.includes('$7.00'))
-    console.log('provider pricing regression: ' + (passes - before) + '/5 passed')
+    provider = 'synthetic-alpha'
+    const afterFailure = commands.length
+    await poll()
+    check('provider pricing: another key failure preserves cached rate and clears unrelated error',
+      commands.length === afterFailure && render(contributions[0].render).text.includes('$2.00') &&
+      !render(contributions[0].render).text.includes('no working python'))
+    console.log('provider pricing regression: ' + (passes - before) + '/6 passed')
   }
 
   // Functional tests run against an installed copy so the SCRIPTS_DIR token is

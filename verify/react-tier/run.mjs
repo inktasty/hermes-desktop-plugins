@@ -69,6 +69,11 @@ async function mountAndTest(name, test, canonicalStats = false) {
   let failRpc = false
   let sessionPayload = { ...SESSION_PAYLOAD }
   let statsPayload = { ...STATS_PAYLOAD }
+  const pendingPrices = []
+  if (canonicalStats === 'race') {
+    state.focusedSessionId.set('synthetic-race')
+    statsPayload.provider = 'synthetic-alpha'
+  }
   sdk.setRpc(async (method, params) => {
     calls.push({ method, params })
     if (failRpc) throw new Error('synthetic offline')
@@ -78,6 +83,9 @@ async function mountAndTest(name, test, canonicalStats = false) {
     }
     if (method === 'session.usage') return { ...sessionPayload }
     if (name === 'session-usage' && canonicalStats) {
+      if (canonicalStats === 'race') {
+        return new Promise(resolve => pendingPrices.push({ command: params.command, resolve }))
+      }
       const input = canonicalStats === 'providers'
         ? params.command.includes("'synthetic-alpha'") ? 2 : params.command.includes("'synthetic-beta'") ? 5 : 7
         : PRICE_PAYLOAD.input
@@ -101,6 +109,7 @@ async function mountAndTest(name, test, canonicalStats = false) {
       container,
       state,
       calls,
+      pendingPrices,
       beforeMountTimers,
       failRpc: () => { failRpc = true },
       setSessionPayload: next => { sessionPayload = next },
@@ -201,6 +210,32 @@ async function testSessionProviders({ container, state, setStatsPayload }) {
   console.log('provider focus regression: ' + (passes - before) + '/3 passed')
 }
 
+async function testSessionRateRace({ container, calls, pendingPrices }) {
+  const before = passes
+  const sessionReplies = pendingPrices.filter(p => p.command.includes("'synthetic-alpha'"))
+  check('rate race starts focused stats and configured lookup',
+    calls.filter(c => c.method === 'session.stats').length === 2 &&
+    pendingPrices.some(p => !p.command.includes("'synthetic-model'")))
+  await settle(() => sessionReplies.forEach(p => p.resolve({ code: 0, stdout: JSON.stringify(PRICE_PAYLOAD) })))
+  await settle(() => container.querySelector('button').dispatchEvent(
+    new dom.window.FocusEvent('focusin', { bubbles: true })
+  ))
+  check('rate race session reply shows rate block', container.textContent.includes('Rates per 1M tokens'))
+  const estimate = container.querySelector('button').textContent
+  await settle(() => pendingPrices.filter(p => !sessionReplies.includes(p)).forEach(p => p.resolve({
+    code: 0, stdout: JSON.stringify({ ...PRICE_PAYLOAD, model: 'synthetic-configured', input: 7 })
+  })))
+  check('rate race late configured reply preserves active rate block', container.textContent.includes('Rates per 1M tokens'))
+  check('rate race late configured reply preserves saved estimate', container.querySelector('button').textContent === estimate)
+  const count = calls.filter(c => c.method === 'shell.exec').length
+  const poll = [...timers.values()].find(t => t.ms === 120000)
+  await settle(() => { void poll.fn() })
+  check('rate race unchanged session does not refetch price', calls.filter(c => c.method === 'shell.exec').length === count)
+  check('rate race deduplicates pending session lookups', sessionReplies.length === 1)
+  await settle(() => pendingPrices.forEach(p => p.resolve({ code: 0, stdout: JSON.stringify(PRICE_PAYLOAD) })))
+  console.log('rate race regression: ' + (passes - before) + '/6 passed')
+}
+
 async function testOpencodeUsage({ container, calls, beforeMountTimers, failRpc }) {
   check('opencode-usage mount effect fetches models', calls.some(c => (
     c.params?.command?.includes('opencode_go_models')
@@ -223,10 +258,68 @@ async function testOpencodeUsage({ container, calls, beforeMountTimers, failRpc 
   await settle(() => refresh.click())
   check('opencode-usage RPC error reaches DOM', container.textContent.includes('Gateway call failed'))
 }
+async function testRestoredModels(label, fetchedAt, shouldRefresh, failRefresh = false) {
+  const entries = []
+  const disposers = []
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  const baseline = [...sdk.atoms].reduce((n, a) => n + a.listenerCount, 0)
+  const cached = {
+    ok: true,
+    models: [{ id: 'synthetic-cached', name: 'Synthetic cached model', input: 1 }],
+    ...(fetchedAt === undefined ? {} : { fetched_at: fetchedAt })
+  }
+  let modelCalls = 0
+  let finishRefresh
+  sdk.setRpc(async (method, params) => {
+    if (params?.command?.includes('opencode_go_models')) {
+      modelCalls++
+      return new Promise(resolve => { finishRefresh = resolve })
+    }
+    return { code: 0, stdout: JSON.stringify(USAGE_PAYLOAD) }
+  })
+  try {
+    const url = pathToFileURL(path.join(source, 'opencode-usage/plugin.js'))
+    url.searchParams.set('restored', label)
+    const plugin = (await import(url)).default
+    await settle(() => plugin.register({
+      register: e => entries.push(e),
+      registerMany: es => entries.push(...es),
+      onDispose: fn => disposers.push(fn),
+      storage: { get: key => key === 'models_v3' ? cached : null, set() {} }
+    }))
+    await settle(() => root.render(createElement(entries.find(e => e.id === 'page').render)))
+    check('restored models ' + label + ' refresh decision', modelCalls === (shouldRefresh ? 1 : 0), 'model calls=' + modelCalls)
+    check('restored models ' + label + ' keeps cached list visible', container.textContent.includes('Synthetic cached model'))
+    if (finishRefresh) {
+      await settle(() => finishRefresh({ code: 0, stdout: JSON.stringify(failRefresh
+        ? { ok: false, error: 'synthetic models failure' }
+        : { ...cached, fetched_at: new Date().toISOString() }) }))
+      check('restored models ' + label + ' keeps list after refresh', container.textContent.includes('Synthetic cached model'))
+      if (failRefresh) {
+        check('restored models failure reaches DOM', container.textContent.includes('synthetic models failure'))
+      } else {
+        await settle(() => [...timers.values()].filter(t => t.ms === 60000).forEach(t => t.fn()))
+        check('restored models ' + label + ' refreshes exactly once', modelCalls === 1)
+      }
+    }
+  } finally {
+    await settle(() => root.unmount())
+    await teardown('restored models ' + label, disposers, baseline, container)
+  }
+}
+
+await testRestoredModels('expired', new Date(Date.now() - 7 * 3600000).toISOString(), true)
+await testRestoredModels('fresh', new Date(Date.now() - 3600000).toISOString(), false)
+await testRestoredModels('missing timestamp', undefined, true)
+await testRestoredModels('invalid timestamp', 'not-a-date', true)
+await testRestoredModels('failed refresh', new Date(Date.now() - 7 * 3600000).toISOString(), true, true)
 await mountAndTest('deepseek-rate', testDeepseekRate)
 await mountAndTest('session-usage', testSessionUsage)
 await mountAndTest('session-usage', testSessionStatsPolling, true)
 await mountAndTest('session-usage', testSessionProviders, 'providers')
+await mountAndTest('session-usage', testSessionRateRace, 'race')
 await mountAndTest('opencode-usage', testOpencodeUsage)
 globalThis.setInterval = originalInterval
 globalThis.clearInterval = originalClear
