@@ -132,6 +132,20 @@ Two things worth knowing about the estimate:
 `deepseek-rate` needs no network at all: the tier is a pure function of the UTC
 clock, and the tooltip renders the peak windows in whatever timezone you are in.
 
+### Session Usage: when a value shows `—`
+
+The chip itself says `usage`, not `—`, when no cost is available; dashes appear
+in its hover panel. Zero tokens with usable rates show `$0.00`, not a dash.
+
+| The panel shows `—` when… | What to do |
+| --- | --- |
+| No session data has arrived (the panel says "No turns yet", rather than showing a cost row). | Focus a session, send a message, then click the chip or wait for the next poll. If polling fails, check the gateway connection: `session.stats` falls back to `session.usage`, and live usage can still update the panel. |
+| **Session cost (est.)** has neither billed spend nor an estimate: rates are still loading or do not match the session's model/provider. | Click the chip or wait for the next poll. A previously accumulated estimate can remain visible while rates are unavailable. |
+| The pricing script fails, leaving no estimate. | Read the panel's error; re-run `install.sh` on the gateway for missing scripts, redeploy app-side plugins with the correct gateway script path, and check gateway Python / `shell.exec`. For a missing or unreadable models.dev cache, restore the gateway's cache, then click the chip to retry. |
+| The registry has no matching model or no usable input/output prices, leaving no estimate. | Check the session's model/provider and update the gateway's models.dev cache if stale; reload desktop plugins after updating a successfully cached lookup. Unpublished prices cannot be estimated. An unknown provider alone is not fatal: other provider catalogs are searched. |
+| **Released** has no valid registry date (including while lookup is pending or failed). | Wait for lookup or resolve its error. If the registry publishes no date, no action is needed; sending a message cannot supply one. |
+| A per-token rate is non-finite after rate calculation. | Check the registry rate data; this is not a zero price. Normally incomplete rate cards are hidden entirely. |
+
 ### Optional: exact billed spend
 
 The "Session cost" row shows the provider's real billed amount only when both of
@@ -164,9 +178,10 @@ described above, which works on every provider.
 
 ## Uninstall
 
-`uninstall.sh` is the inverse of `install.sh`: it removes the three plugin folders
-from the app's `desktop-plugins/` directory and the three scripts from the
-gateway's `scripts/` directory. It writes no config and touches nothing else.
+`uninstall.sh` is the inverse of `install.sh`: it removes each plugin's `plugin.js`
+from the app's `desktop-plugins/` directory, plus the plugin folder once it is
+empty, and the three scripts from the gateway's `scripts/` directory. It writes no
+config and touches nothing else: a plugin folder holding other files is kept.
 
 ```bash
 ./uninstall.sh                      # app plugin folder defaults per-OS
@@ -174,7 +189,7 @@ gateway's `scripts/` directory. It writes no config and touches nothing else.
 HERMES_HOME=/opt/hermes ./uninstall.sh
 ```
 
-Remove only the app-side plugin folder and the gateway scripts it installed; a
+It removes only the app-side plugin files and the gateway scripts it installed; a
 chip disappears after **Reload desktop plugins** from the command palette.
 
 With a remote gateway, run it on each machine, from that machine's clone:
@@ -182,9 +197,9 @@ With a remote gateway, run it on each machine, from that machine's clone:
 - **Gateway machine:** `./uninstall.sh` (or `HERMES_HOME=/opt/hermes ./uninstall.sh`)
   removes the scripts, plus the plugin copies `install.sh` left there.
 - **App machine (Windows):** `./uninstall.sh` from Git Bash removes the plugin
-  folders under `%LOCALAPPDATA%\hermes\desktop-plugins\`; its gateway-script
+  files under `%LOCALAPPDATA%\hermes\desktop-plugins\`; its gateway-script
   lines print `absent`, since the scripts live on the gateway. Without Git Bash,
-  delete the three `<id>` folders there by hand.
+  delete `plugin.js` from the three `<id>` folders there by hand.
 
 ## Verify before trusting it
 

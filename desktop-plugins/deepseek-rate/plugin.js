@@ -148,11 +148,29 @@ function focusedSid() {
 
 let pollFailures = 0
 
+// Current gateways answer `session.stats` and reject the legacy
+// `session.usage` (-32601); older ones only have `session.usage`. Try stats
+// first and remember whichever method answered, so each poll is one request.
+let modelMethod = null
+
+async function requestModel(sid) {
+  if (modelMethod === 'session.usage') return host.request('session.usage', { session_id: sid })
+  try {
+    const resp = await host.request('session.stats', { session_id: sid })
+    modelMethod = 'session.stats'
+    return resp
+  } catch (e) {
+    const resp = await host.request('session.usage', { session_id: sid })
+    if (resp && typeof resp === 'object') modelMethod = 'session.usage'
+    return resp
+  }
+}
+
 async function pollFocusedModel() {
   const sid = focusedSid()
   if (!sid) return
   try {
-    const resp = await host.request('session.usage', { session_id: sid })
+    const resp = await requestModel(sid)
     pollFailures = 0
     const model = resp && typeof resp.model === 'string' ? resp.model : ''
     // Focus moved while the request was in flight: the reply describes a
@@ -165,7 +183,7 @@ async function pollFocusedModel() {
     // One line per failure streak: a broken link shows up in the app log
     // without a 10s heartbeat filling it.
     if (pollFailures === 1) {
-      console.error('[deepseek-rate] session.usage poll failed: ' + String((e && e.message) || e))
+      console.error('[deepseek-rate] session model poll failed: ' + String((e && e.message) || e))
     }
   }
 }

@@ -1,0 +1,76 @@
+$ErrorActionPreference = 'Stop'
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$deploy = Join-Path $repoRoot 'deploy-windows.ps1'
+$engine = (Get-Process -Id $PID).Path
+$root = Join-Path ([IO.Path]::GetTempPath()) ('hermes-deploy-test-' + [guid]::NewGuid())
+$savedHome = $env:HERMES_HOME
+$ids = @('deepseek-rate', 'opencode-usage', 'session-usage')
+
+function Assert($Condition, [string]$Message) {
+    if (-not $Condition) { throw $Message }
+}
+
+function Deploy([string[]]$DeployArgs, [int]$ExpectedExit = 0) {
+    $output = & $engine -NoProfile -File $deploy @DeployArgs 2>&1
+    Assert ($LASTEXITCODE -eq $ExpectedExit) "Expected exit $ExpectedExit, got ${LASTEXITCODE}: $output"
+    return ($output -join "`n")
+}
+
+function Check-Files([string]$AppDir, [string[]]$PluginIds, [string]$Literal) {
+    $files = @(Get-ChildItem -LiteralPath $AppDir -Recurse -File)
+    Assert ($files.Count -eq $PluginIds.Count) 'Unexpected deployed file count'
+    foreach ($id in $PluginIds) {
+        $path = Join-Path (Join-Path $AppDir $id) 'plugin.js'
+        $bytes = [IO.File]::ReadAllBytes($path)
+        Assert (-not ($bytes.Length -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191)) "$id has a UTF-8 BOM"
+        $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+        $content = $utf8.GetString($bytes)
+        Assert (-not $content.Contains("`r")) "$id is not LF-only"
+        Assert (-not $content.Contains('__HERMES_SCRIPTS__')) "$id retains the scripts token"
+        $src = Join-Path (Join-Path (Join-Path $repoRoot 'desktop-plugins') $id) 'plugin.js'
+        $expected = [IO.File]::ReadAllText($src).Replace('__HERMES_SCRIPTS__', $Literal).Replace("`r`n", "`n")
+        Assert ($content -ceq $expected) "$id differs from the expected JS literal substitution"
+    }
+}
+
+try {
+    $env:HERMES_HOME = $null
+    $app = Join-Path $root 'full'
+    # install.sh escapes backslashes first, then single quotes for the JS literal.
+    $scripts = "C:\gateway's\scripts"
+    $literal = 'C:\\gateway\''s\\scripts'
+    $null = Deploy @('-AppDir', $app, '-ScriptsDir', $scripts)
+    Check-Files $app $ids $literal
+    Write-Host 'PASS: full deploy; JS escaping, no tokens, UTF-8 without BOM, LF only (3 plugins)'
+
+    $output = Deploy @('-AppDir', $app, '-ScriptsDir', $scripts)
+    $unchanged = @($output -split "`n" | Where-Object { $_ -like 'unchanged *' })
+    Assert ($unchanged.Count -eq 3 -and $output -notmatch '(?m)^wrote ') 'Second deploy did not report all plugins unchanged'
+    Write-Host 'PASS: second deploy reports unchanged (3 plugins)'
+
+    $only = Join-Path $root 'only'
+    $null = Deploy @('-AppDir', $only, '-ScriptsDir', $scripts, '-Only', 'session-usage')
+    Check-Files $only @('session-usage') $literal
+    Write-Host 'PASS: -Only session-usage deploys only that plugin'
+
+    $invalid = Join-Path $root 'invalid'
+    $null = Deploy @('-AppDir', $invalid, '-ScriptsDir', $scripts, '-Only', 'unknown-plugin') 1
+    Assert (-not (Test-Path -LiteralPath $invalid)) 'Unknown -Only wrote files'
+    Write-Host 'PASS: unknown -Only exits 1'
+
+    $missing = Join-Path $root 'missing'
+    $null = Deploy @('-AppDir', $missing) 1
+    Assert (-not (Test-Path -LiteralPath $missing)) 'Missing scripts path wrote files'
+    Write-Host 'PASS: missing -ScriptsDir with HERMES_HOME unset exits 1'
+
+    $env:HERMES_HOME = Join-Path $root 'gateway'
+    $fallback = Join-Path $root 'fallback'
+    $null = Deploy @('-AppDir', $fallback)
+    $homeScripts = (Join-Path $env:HERMES_HOME 'scripts').Replace('\', '/')
+    Check-Files $fallback $ids $homeScripts
+    Write-Host 'PASS: HERMES_HOME fallback uses <HERMES_HOME>/scripts'
+    Write-Host "PASS: deployment checks complete (PowerShell $($PSVersionTable.PSVersion))"
+} finally {
+    $env:HERMES_HOME = $savedHome
+    if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+}

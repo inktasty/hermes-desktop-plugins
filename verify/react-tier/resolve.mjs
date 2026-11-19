@@ -11,7 +11,7 @@ export async function resolve(specifier, context, nextResolve) {
 }
 
 export async function load(url, context, nextLoad) {
-  if (url.endsWith('/plugin.js')) {
+  if (new URL(url).pathname.endsWith('/plugin.js')) {
     const source = (await readFile(new URL(url), 'utf8')).replaceAll('__HERMES_SCRIPTS__', '/synthetic/scripts')
     return { format: 'module', source, shortCircuit: true }
   }

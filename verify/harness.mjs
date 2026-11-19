@@ -519,6 +519,51 @@ async function testDeepseekRate() {
   const dsPeak = await gate('deepseek-v4.1-flash', 'deepseek-v4.1-flash', 's3', ON)
   check('DeepSeek session renders warn at peak', dsPeak === 'warn', String(dsPeak))
 
+  // The canonical gateway answers session.stats and rejects session.usage
+  // (-32601); a legacy gateway is the reverse. Either way a freshly focused
+  // session with no live frame must be colored by its own polled model.
+  for (const mode of ['canonical', 'legacy']) {
+    Date.now = () => OFF
+    const { mod: pollMod } = await loadPlugin('deepseek-rate', { fresh: 'poll-' + mode })
+    const methods = []
+    const unknown = name => Object.assign(new Error('unknown method: ' + name), { code: -32601 })
+    const sid = 'sess-ds-' + mode
+    let model = 'deepseek-v4.1-flash'
+    sdk.host.state.focusedUsage.set(null)
+    sdk.host.state.focusedSessionId.set(sid)
+    sdk.host.state.model.set('opencode-go/omen-alpha')
+    sdk.setRpc(async (method, params) => {
+      methods.push({ method, params })
+      if (method === (mode === 'canonical' ? 'session.usage' : 'session.stats')) throw unknown(method)
+      if (method === 'session.stats') return { model, provider: 'synthetic', total_tokens: 0, api_calls: 0 }
+      if (method === 'session.usage') return { model }
+      return {}
+    })
+    const { ctx: pollCtx, contributions: pollContrib } = captureCtx()
+    stubTimers()
+    pollMod.register(pollCtx)
+    const poll = timers.find(t => t.ms === 10000).fn
+    restoreTimers()
+    await settle()
+    const variant = () => {
+      const b = primOf(render(pollContrib[0].render), 'Badge')[0]
+      return b && b.props && b.props.variant
+    }
+    check(mode + ' poll: DeepSeek session colored without live frame', variant() === 'success', String(variant()))
+    model = 'opencode-go/omen-alpha'
+    sdk.host.state.model.set('deepseek-v4.1-flash')
+    await poll()
+    check(mode + ' poll: non-DeepSeek session stays neutral over a DeepSeek picker', variant() === 'none', String(variant()))
+    const count = name => methods.filter(x => x.method === name).length
+    if (mode === 'canonical') {
+      check('canonical poll: session_id sent to session.stats', methods.some(x => x.method === 'session.stats' && x.params.session_id === sid), JSON.stringify(methods))
+      check('canonical poll: no legacy round-trip', count('session.stats') === 2 && count('session.usage') === 0, JSON.stringify(methods))
+    } else {
+      check('legacy poll: working method cached', count('session.stats') === 1 && count('session.usage') === 2, JSON.stringify(methods))
+    }
+    console.log('    ' + mode + ' gateway poll: badge and RPC routing checked')
+  }
+
   // hook-count oracle across state transitions
   const counts = []
   const spins = [
@@ -631,7 +676,13 @@ async function testSessionUsage() {
     sdk.host.state.focusedSessionId.set('synthetic-unavailable-session')
     await poll()
     check('provider pricing: failed lookup does not reuse another provider rate', !render(contributions[0].render).text.includes('$7.00'))
-    console.log('provider pricing regression: ' + (passes - before) + '/5 passed')
+    provider = 'synthetic-alpha'
+    const afterFailure = commands.length
+    await poll()
+    check('provider pricing: another key failure preserves cached rate and clears unrelated error',
+      commands.length === afterFailure && render(contributions[0].render).text.includes('$2.00') &&
+      !render(contributions[0].render).text.includes('no working python'))
+    console.log('provider pricing regression: ' + (passes - before) + '/6 passed')
   }
 
   // Functional tests run against an installed copy so the SCRIPTS_DIR token is
