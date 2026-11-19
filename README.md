@@ -132,12 +132,12 @@ Two things worth knowing about the estimate:
 `deepseek-rate` needs no network at all: the tier is a pure function of the UTC
 clock, and the tooltip renders the peak windows in whatever timezone you are in.
 
-### Session Usage: missing values
+### Session Usage: when a value shows `—`
 
 The chip itself says `usage`, not `—`, when no cost is available; dashes appear
 in its hover panel. Zero tokens with usable rates show `$0.00`, not a dash.
 
-| Chip shows a dash when… | What to do |
+| The panel shows `—` when… | What to do |
 | --- | --- |
 | No session data has arrived (the panel says "No turns yet", rather than showing a cost row). | Focus a session, send a message, then click the chip or wait for the next poll. If polling fails, check the gateway connection: `session.stats` falls back to `session.usage`, and live usage can still update the panel. |
 | **Session cost (est.)** has neither billed spend nor an estimate: rates are still loading or do not match the session's model/provider. | Click the chip or wait for the next poll. A previously accumulated estimate can remain visible while rates are unavailable. |
