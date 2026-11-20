@@ -18,6 +18,22 @@ try {
   fs.copyFileSync(path.join(here, 'argv-fixture.py'), script)
   const python = execFileSync('python', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).trim()
   const args = ['model%VALUE%', 'provider%PATH%', '%UNDEFINED_VALUE%', '100%', 'a b%VALUE%&c']
+  const expandedDir = path.join(root, 'scripts with spaces', 'expanded-path')
+  fs.mkdirSync(expandedDir)
+  fs.copyFileSync(script, path.join(expandedDir, 'argv.py'))
+  const controlEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !['PATH', 'VALUE', 'UNDEFINED_VALUE'].includes(key.toUpperCase())))
+  controlEnv.PATH = 'expanded-path'
+  controlEnv.VALUE = 'expanded value'
+  const controlCommand = [python, script, ...args].map(value => '"' + value + '"').join(' ')
+  const control = spawnSync('cmd.exe', ['/d', '/s', '/c', '"' + controlCommand + '"'], {
+    env: controlEnv, encoding: 'utf8', windowsVerbatimArguments: true,
+  })
+  assert.ifError(control.error)
+  assert.equal(control.status, 0, control.stderr)
+  const expanded = JSON.parse(control.stdout)
+  assert.notDeepEqual(expanded, [script, ...args])
+  assert.equal(expanded[1], 'modelexpanded value')
+  console.log('PASS: control: plain double quotes expand %VAR% under cmd.exe; argv[1]=' + JSON.stringify(expanded[1]))
   for (const id of ['session-usage', 'opencode-usage']) {
     const copy = path.join(root, id + '.mjs')
     fs.copyFileSync(path.join(here, '..', 'desktop-plugins', id, 'plugin.js'), copy)
