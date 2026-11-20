@@ -692,6 +692,8 @@ async function testSessionUsage() {
   // The helper is duplicated per plugin, so pin session-usage's copy as well.
   check('shell quote: session-usage POSIX form', suNs.shellQuote('/x y/a.py', false) === "'/x y/a.py'", suNs.shellQuote('/x y/a.py', false))
   check('shell quote: session-usage cmd.exe form', suNs.shellQuote('C:/x y/a.py', true) === '"C:/x y/a.py"', suNs.shellQuote('C:/x y/a.py', true))
+  check('shell quote: session-usage preserves percent paths', suNs.shellQuote('C:/x %PATH%/a.py', true) === '"C:/x "^%"PATH"^%"/a.py"')
+  check('shell quote: session-usage preserves percent model/provider tokens', suNs.shellQuote('model%PATH%', true) === '"model"^%"PATH"^%""' && suNs.shellQuote('provider%VALUE%', true) === '"provider"^%"VALUE"^%""')
   check('shell quote: session-usage takes the gateway form for a non-path value', suNs.shellQuote('C:/x y/a.py') === "'C:/x y/a.py'", suNs.shellQuote('C:/x y/a.py'))
 
   // mergeUsage: a monotonic-max merge, so an out-of-order live frame can never
@@ -1441,6 +1443,8 @@ async function testOpencodeUsage() {
   // from the value being quoted, because a model id carries no clue about the platform.
   check('shell quote: POSIX sh form', ns.shellQuote('/home/x/scripts/a.py', false) === "'/home/x/scripts/a.py'", ns.shellQuote('/home/x/scripts/a.py', false))
   check('shell quote: cmd.exe form', ns.shellQuote('C:/Users/x/scripts/a.py', true) === '"C:/Users/x/scripts/a.py"', ns.shellQuote('C:/Users/x/scripts/a.py', true))
+  check('shell quote: preserves percent paths', ns.shellQuote('C:/x %PATH%/a.py', true) === '"C:/x "^%"PATH"^%"/a.py"')
+  check('shell quote: preserves percent model/provider tokens', ns.shellQuote('model%PATH%', true) === '"model"^%"PATH"^%""' && ns.shellQuote('provider%VALUE%', true) === '"provider"^%"VALUE"^%""')
   check('shell quote: a space is protected on both', ns.shellQuote('/home/x y/a.py', false) === "'/home/x y/a.py'" && ns.shellQuote('C:/x y/a.py', true) === '"C:/x y/a.py"', 'both')
   check('shell quote: a literal $ cannot expand on POSIX', ns.shellQuote('/home/$x/a.py', false) === "'/home/$x/a.py'", ns.shellQuote('/home/$x/a.py', false))
   check('shell quote: an embedded quote is escaped, not left to break out', ns.shellQuote("/home/it's/a.py", false).indexOf("'\\''") !== -1, ns.shellQuote("/home/it's/a.py", false)) // privacy: allow=home -- synthetic shell-escaping fixture
