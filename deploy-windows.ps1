@@ -36,7 +36,7 @@ if (-not $AppDir) {
 # HERMES_HOME when that happens to be set in this shell, otherwise refuse.
 if (-not $ScriptsDir) {
     if ($env:HERMES_HOME) {
-        $ScriptsDir = (Join-Path $env:HERMES_HOME 'scripts').Replace('\', '/')
+        $ScriptsDir = $env:HERMES_HOME.Replace('\', '/').TrimEnd('/') + '/scripts'
         Write-Host "no -ScriptsDir given; using HERMES_HOME: $ScriptsDir"
     } else {
         Write-Host 'error: no -ScriptsDir given, and HERMES_HOME is not set in this shell.'
