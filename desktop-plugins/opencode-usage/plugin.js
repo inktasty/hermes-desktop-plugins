@@ -92,7 +92,7 @@ export function shellQuote(p, windows = GATEWAY_WINDOWS) {
     // cannot contain a double quote at all: rather than hand cmd a token that means
     // something different to the program than to the shell, refuse the value.
     if (s.indexOf('"') !== -1) throw new Error('cannot quote a double quote for cmd.exe')
-    return '"' + s + '"'
+    return '"' + s.replace(/(\\*)%/g, '$1$1"^%"') + '"'
   }
   return "'" + s.replace(/'/g, "'\\''") + "'"
 }
