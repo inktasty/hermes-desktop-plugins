@@ -26,7 +26,12 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
+if sys.platform == "win32":
+    _local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+    _default_home = (Path(_local_appdata) if _local_appdata else Path.home() / "AppData" / "Local") / "hermes"
+else:
+    _default_home = Path.home() / ".hermes"
+HERMES_HOME = Path(os.environ.get("HERMES_HOME") or _default_home)
 CACHE = HERMES_HOME / "models_dev_cache.json"
 CONFIG = HERMES_HOME / "config.yaml"
 

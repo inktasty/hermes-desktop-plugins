@@ -52,6 +52,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from itertools import repeat
+from pathlib import Path
 
 USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 TIMEOUT = 20
@@ -92,7 +93,13 @@ WINDOWS = (
 
 
 def hermes_home() -> str:
-    return os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    if os.environ.get("HERMES_HOME"):
+        return os.environ["HERMES_HOME"]
+    if sys.platform == "win32":
+        local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+        base = Path(local_appdata) if local_appdata else Path.home() / "AppData" / "Local"
+        return str(base / "hermes")
+    return str(Path.home() / ".hermes")
 
 
 def safe_label(value) -> str:
