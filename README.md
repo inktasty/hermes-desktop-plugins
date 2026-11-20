@@ -29,7 +29,7 @@ Easiest path: paste this one line into your Hermes agent and it does the whole
 thing.
 
 ```text
-Install the desktop plugins in https://github.com/inktasty/hermes-desktop-plugins: clone the repo, follow its README, run ./install.sh (pass HERMES_HOME if the gateway home is not ~/.hermes) so the plugins point at the gateway's scripts and land in the desktop-plugins folder on the machine running the app, then reload desktop plugins and confirm all three loaded.
+Install the desktop plugins in https://github.com/inktasty/hermes-desktop-plugins: clone the repo, follow its README, run ./install.sh (pass HERMES_HOME if the gateway home is not the default: ~/.hermes, or %LOCALAPPDATA%\hermes on a Windows gateway) so the plugins point at the gateway's scripts and land in the desktop-plugins folder on the machine running the app, then reload desktop plugins and confirm all three loaded.
 ```
 
 By hand instead:
@@ -37,7 +37,7 @@ By hand instead:
 ```bash
 git clone https://github.com/inktasty/hermes-desktop-plugins
 cd hermes-desktop-plugins
-./install.sh                      # gateway home defaults to ~/.hermes
+./install.sh                      # gateway home defaults to ~/.hermes (Windows: %LOCALAPPDATA%\hermes)
 ./install.sh /path/to/desktop-plugins   # ...or point it straight at the app folder
 ```
 
@@ -70,14 +70,15 @@ elsewhere), install on each machine from its own clone of the repo.
 **1. On the gateway machine**, install the gateway scripts:
 
 ```bash
-./install.sh                          # gateway home ~/.hermes
+./install.sh                          # gateway home ~/.hermes (Windows: %LOCALAPPDATA%\hermes)
 HERMES_HOME=/opt/hermes ./install.sh  # ...or a non-default gateway home
 ```
 
 This copies the three scripts into `$HERMES_HOME/scripts/` and prints that path
 (`installed gateway scripts -> ...`); it is the `-ScriptsDir` for step 2. It also
-copies the plugins into the gateway machine's own `~/.hermes/desktop-plugins/`,
-which nothing reads unless an app runs there too.
+copies the plugins into the gateway machine's own `desktop-plugins/` folder
+(`~/.hermes/desktop-plugins/`, or `%LOCALAPPDATA%\hermes\desktop-plugins\` on
+Windows), which nothing reads unless an app runs there too.
 
 **2. On the app machine**, deploy the plugins pointed at the gateway's scripts:
 
@@ -113,7 +114,8 @@ cost for providers like `opencode-go`. `session-usage` fills the gap:
 1. Exact billed spend wins when the backend reports it
    (`dev_credits_spent_micros`), labeled "Session cost".
 2. Otherwise `gateway-scripts/model_price_lookup.py` reads rates from the
-   gateway's local models.dev registry cache (`~/.hermes/models_dev_cache.json`)
+   gateway's local models.dev registry cache (`models_dev_cache.json` in the gateway
+   home: `~/.hermes/`, or `%LOCALAPPDATA%\hermes\` on a Windows gateway)
    and the chip shows an estimate, labeled "(est.)".
 
 Two things worth knowing about the estimate:
@@ -161,8 +163,10 @@ credits line for every response. Turn it on only if both conditions above are tr
 for you.
 
 The flag has to reach the gateway process, which reads its own environment, so the
-gateway's `.env` is the reliable place (`$HERMES_HOME/.env`, or `HOME` of whoever
-runs the gateway, for example `~/.hermes/.env`):
+gateway's `.env` is the reliable place: `$HERMES_HOME/.env`, which by default is
+`~/.hermes/.env` for whoever runs the gateway, or `%LOCALAPPDATA%\hermes\.env` on
+a Windows gateway (falling back to `~\AppData\Local\hermes\.env` when
+`LOCALAPPDATA` is unset):
 
 ```bash
 echo 'HERMES_DEV_CREDITS=1' >> ~/.hermes/.env
