@@ -18,6 +18,11 @@ jobs:
         run: pwsh -NoProfile -File verify/deploy-windows.test.ps1
       - name: Deploy assertions (Windows PowerShell 5.1)
         run: powershell -NoProfile -File verify/deploy-windows.test.ps1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Windows shell quoting assertions
+        run: node verify/windows-shell.test.mjs
 
   privacy:
     runs-on: ubuntu-latest
