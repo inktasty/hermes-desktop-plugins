@@ -777,9 +777,14 @@ async function testSessionUsage() {
   // gateway's form, and it must arrive as one bare token: an id handed over already
   // JSON-encoded kept its own double quotes through the shell and looked up nothing.
   let composedFresh = 92
-  for (const [composedDir, composedWin] of [['/tmp/hdp-test/scripts', false], ['C:/Users/x/hermes/scripts', true]]) {
+  for (const [composedDir, composedWin] of [
+    ['/tmp/hdp-test/scripts', false],
+    ['C:/Users/x/hermes/scripts', true],
+    ['//server/share/scripts', true],
+    ['\\\\server\\share\\scripts', true],
+  ]) {
     const composed = []
-    const { mod: cmod } = await loadPlugin('session-usage', { fresh: composedFresh++, scriptsDir: composedDir })
+    const { mod: cmod } = await loadPlugin('session-usage', { fresh: 'composed-' + composedFresh++, scriptsDir: composedDir })
     const { ctx: cctx, contributions: ccontrib } = captureCtx()
     cctx.storage = { get: () => undefined, set: () => {} }
     sdk.setRpc(async (method, params) => {
@@ -2036,9 +2041,13 @@ async function testOpencodeUsage() {
   // Composition, not just the helper: what actually broke was the whole command, so pin
   // it for a Windows gateway too. A single-quoted path reaches python with the quotes
   // attached, so every interpreter candidate fails and the chip reports no python.
-  {
+  for (const [i, scriptsDir] of [
+    'C:/Users/x/hermes/scripts',
+    '//server/share/scripts',
+    '\\\\server\\share\\scripts',
+  ].entries()) {
     const composed = []
-    const { mod: wmod } = await loadPlugin('opencode-usage', { fresh: 91, scriptsDir: 'C:/Users/x/hermes/scripts' })
+    const { mod: wmod } = await loadPlugin('opencode-usage', { fresh: 'windows-composed-' + i, scriptsDir })
     const { ctx: wctx } = captureCtx()
     sdk.setRpc(async (method, params) => {
       if (method === 'shell.exec') {
@@ -2054,9 +2063,9 @@ async function testOpencodeUsage() {
     wmod.register(wctx)
     restoreTimers()
     await settle(12)
-    const winPath = /^python3 "C:\/Users\/x\/hermes\/scripts\/[a-z_0-9]+\.py"/
+    const winPaths = ['opencode_go_models.py', 'opencode_go_usage.py'].map(name => 'python3 "' + scriptsDir + '/' + name + '"')
     check('command composition: a Windows gateway gets a double-quoted script path, no single quote anywhere',
-      composed.length > 0 && composed.every(c => winPath.test(c) && c.indexOf("'") === -1), JSON.stringify(composed))
+      composed.length > 0 && composed.every(c => winPaths.includes(c) && c.indexOf("'") === -1), JSON.stringify(composed))
   }
 
   Date.now = realNow
