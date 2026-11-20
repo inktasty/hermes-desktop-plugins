@@ -83,7 +83,7 @@ const PY_CANDIDATES = ['python3', 'python', 'py -3']
 // gateway's own path -- and never from the value being quoted: a model id carries no
 // clue about the platform, so testing the value answered "POSIX" on every gateway and
 // broke Windows ones.
-const GATEWAY_WINDOWS = /^[A-Za-z]:[\\/]/.test(String(SCRIPTS_DIR)) || String(SCRIPTS_DIR).indexOf('\\') !== -1
+const GATEWAY_WINDOWS = /^[A-Za-z]:[\\/]/.test(String(SCRIPTS_DIR)) || String(SCRIPTS_DIR).startsWith('//') || String(SCRIPTS_DIR).indexOf('\\') !== -1
 
 export function shellQuote(p, windows = GATEWAY_WINDOWS) {
   const s = String(p == null ? '' : p)
