@@ -17,6 +17,7 @@ try {
   const script = path.join(dir, 'argv.py')
   fs.copyFileSync(path.join(here, 'argv-fixture.py'), script)
   const python = execFileSync('python', ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).trim()
+  const cmd = process.env.ComSpec || path.join(process.env.SystemRoot, 'System32', 'cmd.exe')
   const args = ['model%VALUE%', 'provider%PATH%', '%UNDEFINED_VALUE%', '100%', 'a b%VALUE%&c']
   const expandedDir = path.join(root, 'scripts with spaces', 'expanded-path')
   fs.mkdirSync(expandedDir)
@@ -25,7 +26,7 @@ try {
   controlEnv.PATH = 'expanded-path'
   controlEnv.VALUE = 'expanded value'
   const controlCommand = [python, script, ...args].map(value => '"' + value + '"').join(' ')
-  const control = spawnSync('cmd.exe', ['/d', '/s', '/c', '"' + controlCommand + '"'], {
+  const control = spawnSync(cmd, ['/d', '/s', '/c', '"' + controlCommand + '"'], {
     env: controlEnv, encoding: 'utf8', windowsVerbatimArguments: true,
   })
   assert.ifError(control.error)
@@ -45,7 +46,7 @@ try {
         env.PATH = process.env.PATH || process.env.Path
         env.VALUE = 'expanded value'
       }
-      const result = spawnSync('cmd.exe', ['/d', '/s', '/c', '"' + command + '"'], {
+      const result = spawnSync(cmd, ['/d', '/s', '/c', '"' + command + '"'], {
         env, encoding: 'utf8', windowsVerbatimArguments: true,
       })
       assert.ifError(result.error)
