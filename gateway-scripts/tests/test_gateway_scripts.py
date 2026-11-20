@@ -18,7 +18,10 @@ import os
 import sys
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
+from threading import Barrier, Event, Lock
+from unittest.mock import patch
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 
@@ -239,6 +242,68 @@ class GatewayScriptTests(unittest.TestCase):
         env = self.home / ".env"
         env.write_text("OPENCODE_GO_API_KEY=env-key\n", encoding="utf-8")
         self.assertEqual(self.models.gateway_key(), "env-key")
+
+    def test_usage_probes_overlap_and_preserve_pool_order(self):
+        rows = [
+            dict(index=i, label="Synthetic %d" % i, priority=i, source="manual",
+                 pool_status="exhausted" if i == 0 else None, key="test-%d" % i if i != 2 else "")
+            for i in range(6)
+        ]
+        first_wave = Barrier(3)
+        later_request = Event()
+        lock = Lock()
+        requests = []
+        in_flight = peak = 0
+
+        def urlopen(request, timeout):
+            nonlocal in_flight, peak
+            auth = request.get_header("Authorization")
+            index = int(auth.rsplit("-", 1)[1])
+            with lock:
+                requests.append((auth, request.full_url, timeout))
+                in_flight += 1
+                peak = max(peak, in_flight)
+            try:
+                if index in (0, 1, 3):
+                    first_wave.wait(timeout=3)
+                if index == 0 and not later_request.wait(timeout=3):
+                    raise TimeoutError("never scheduled a later request")
+                if index == 1:
+                    raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, None)
+                if index == 3:
+                    raise TimeoutError("synthetic slow request")
+                if index == 5:
+                    later_request.set()
+                return io.BytesIO(json.dumps({"usage": {"rolling": {"percent": index + 1}}}).encode())
+            finally:
+                with lock:
+                    in_flight -= 1
+
+        output = io.StringIO()
+        with patch.object(self.usage, "collect_entries", return_value=rows), \
+             patch.object(self.usage, "heartbeat"), \
+             patch.object(self.usage.urllib.request, "urlopen", side_effect=urlopen), \
+             contextlib.redirect_stdout(output):
+            self.assertEqual(self.usage.main(), 0)
+
+        self.assertEqual(peak, 3)
+        indexes = [0, 1, 3, 4, 5]
+        self.assertCountEqual(requests, [
+            ("Bearer test-%d" % i, self.usage.USAGE_URL, self.usage.TIMEOUT) for i in indexes
+        ])
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["ok"])
+        self.assertEqual([row["index"] for row in result["skipped_keys"]], [2])
+        keys = result["keys"]
+        self.assertEqual([key["index"] for key in keys], indexes)
+        self.assertEqual([key["ordinal"] for key in keys], [1, 2, 3, 4, 5])
+        self.assertTrue(keys[0]["benched"])
+        self.assertEqual([key["index"] for key in keys if key["active"]], [1])
+        self.assertEqual((keys[1]["ok"], keys[1]["error"], keys[1]["status"]),
+                         (False, "API key rejected", 401))
+        self.assertEqual((keys[2]["ok"], keys[2]["error"]), (False, "TimeoutError: synthetic slow request"))
+        self.assertEqual([key["ok"] for key in keys], [True, False, False, True, True])
+        self.assertEqual(result["windows"], keys[0]["windows"])
 
     # -- spool round-trip (atomic write) -----------------------------------
 
