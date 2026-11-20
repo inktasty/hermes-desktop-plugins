@@ -66,9 +66,22 @@ try {
     $env:HERMES_HOME = Join-Path $root 'gateway'
     $fallback = Join-Path $root 'fallback'
     $null = Deploy @('-AppDir', $fallback)
-    $homeScripts = (Join-Path $env:HERMES_HOME 'scripts').Replace('\', '/')
+    $homeScripts = $env:HERMES_HOME.Replace('\', '/') + '/scripts'
     Check-Files $fallback $ids $homeScripts
     Write-Host 'PASS: HERMES_HOME fallback uses <HERMES_HOME>/scripts'
+
+    $driveNames = @(Get-PSDrive | ForEach-Object { $_.Name })
+    $unusedDrive = 90..65 | ForEach-Object { [string][char]$_ } | Where-Object { $driveNames -notcontains $_ } | Select-Object -First 1
+    Assert ($null -ne $unusedDrive) 'No unused drive letter available for remote gateway test'
+    $remoteScripts = $unusedDrive + ':/remote-hermes/scripts'
+    $case = 0
+    foreach ($ending in @('', '\', '/')) {
+        $env:HERMES_HOME = $unusedDrive + ':\remote-hermes' + $ending
+        $remote = Join-Path $root ('remote-' + $case++)
+        $null = Deploy @('-AppDir', $remote)
+        Check-Files $remote $ids $remoteScripts
+    }
+    Write-Host 'PASS: remote-only drive fallback; exact path with or without trailing separator'
     Write-Host "PASS: deployment checks complete (PowerShell $($PSVersionTable.PSVersion))"
 } finally {
     $env:HERMES_HOME = $savedHome
