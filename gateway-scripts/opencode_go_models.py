@@ -37,7 +37,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
+if sys.platform == "win32":
+    _local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+    _default_home = (Path(_local_appdata) if _local_appdata else Path.home() / "AppData" / "Local") / "hermes"
+else:
+    _default_home = Path.home() / ".hermes"
+HERMES_HOME = Path(os.environ.get("HERMES_HOME") or _default_home)
 ENV_FILE = HERMES_HOME / ".env"
 CATALOG_CACHE = HERMES_HOME / "cache" / "opencode_go_catalog.json"
 REGISTRY_CACHE = HERMES_HOME / "models_dev_cache.json"

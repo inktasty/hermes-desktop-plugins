@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent
 
@@ -30,6 +31,35 @@ def _load(name, filename):
     sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
+
+
+class HermesHomeTests(unittest.TestCase):
+    def test_platform_home_defaults_and_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "user home"
+            local = Path(tmp) / "Local AppData"
+            override = Path(tmp) / "custom gateway"
+            cases = (
+                ("win32", {"LOCALAPPDATA": str(local)}, local / "hermes"),
+                ("win32", {}, home / "AppData" / "Local" / "hermes"),
+                ("win32", {"LOCALAPPDATA": ""}, home / "AppData" / "Local" / "hermes"),
+                ("win32", {"LOCALAPPDATA": "  "}, home / "AppData" / "Local" / "hermes"),
+                ("win32", {"LOCALAPPDATA": str(local), "HERMES_HOME": str(override)}, override),
+                ("linux", {"LOCALAPPDATA": str(local)}, home / ".hermes"),
+                ("darwin", {}, home / ".hermes"),
+                ("linux", {"HERMES_HOME": str(override)}, override),
+            )
+            for platform, env, expected in cases:
+                with self.subTest(platform=platform, env=env):
+                    with patch.dict(os.environ, env, clear=True), patch.object(sys, "platform", platform), \
+                            patch.object(Path, "home", return_value=home), \
+                            patch("os.path.expanduser", return_value=str(home / ".hermes")):
+                        price = _load("home_price", "model_price_lookup.py")
+                        models = _load("home_models", "opencode_go_models.py")
+                        usage = _load("home_usage", "opencode_go_usage.py")
+                        self.assertEqual(price.HERMES_HOME, expected)
+                        self.assertEqual(models.HERMES_HOME, expected)
+                        self.assertEqual(Path(usage.hermes_home()), expected)
 
 
 class GatewayScriptTests(unittest.TestCase):
