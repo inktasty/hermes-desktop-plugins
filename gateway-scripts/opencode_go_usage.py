@@ -50,10 +50,13 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from itertools import repeat
 from pathlib import Path
 
 USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 TIMEOUT = 20
+MAX_CONCURRENT_PROBES = 3
 # shell.exec hands back only the LAST 4000 chars of stdout, so anything larger
 # ships gzipped+base64 as {"ok":true,"gzip":"<b64>"} and is inflated by the
 # plugin (same contract as opencode_go_models.py).
@@ -425,6 +428,14 @@ def probe(key: str, now: dt.datetime):
     return True, windows, None, None
 
 
+def probe_keys(keys: list, now: dt.datetime) -> list:
+    if len(keys) == 1:
+        return [probe(keys[0], now)]
+    # map keeps pool order even when a lower-priority request finishes first.
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_PROBES) as executor:
+        return list(executor.map(probe, keys, repeat(now)))
+
+
 def emit(payload: dict) -> None:
     """ONE line of JSON. Gzipped+base64 when the plain form would be cut off by
     shell.exec's 4000-char stdout tail."""
@@ -483,8 +494,9 @@ def main() -> int:
             active_at = position
             break
 
+    results = probe_keys([row["key"] for row in usable], now)
     keys_out = []
-    for position, row in enumerate(usable):
+    for position, (row, result) in enumerate(zip(usable, results)):
         benched, until = bench_info(row, now)
         base = {
             "index": row["index"],
@@ -503,7 +515,7 @@ def main() -> int:
             base["last_error_code"] = row["last_error_code"]
         if row.get("request_count") is not None:
             base["request_count"] = row["request_count"]
-        ok, windows, error, status = probe(row["key"], now)
+        ok, windows, error, status = result
         entry_out = dict(base, ok=ok, windows=windows)
         if error:
             entry_out["error"] = error
