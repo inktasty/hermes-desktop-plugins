@@ -201,6 +201,11 @@ With a remote gateway, run it on each machine, from that machine's clone:
   lines print `absent`, since the scripts live on the gateway. Without Git Bash,
   delete `plugin.js` from the three `<id>` folders there by hand.
 
+## Security
+
+See the [security model](SECURITY_MODEL.md) for the plugins' trust boundaries
+and gateway access.
+
 ## Verify before trusting it
 
 `verify/` is an offline harness: stub `@hermes/plugin-sdk` and React modules,

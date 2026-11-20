@@ -24,8 +24,8 @@ Scratch and dev code, which is lower priority: wiz101 `backend/_*.py`, DeerQuest
 - **wiz101 Desktop Shell**: Tauri v2 with `csp: null` and `shell:allow-execute`/`shell:allow-spawn` on all windows (`"windows": ["*"]`), which includes the wiki-viewer window that loads third-party content. It spawns the backend with a bare `python` from PATH.
 - **DeerQuest Server**: a `ThreadingHTTPServer` on `127.0.0.1:8798`. **[owner]** The owner uses it through Tailscale Serve at its `.ts.net` address, so any browser on the tailnet that the owner uses can reach it cross-site. `authorized()` allows the configured `AUTH_EMAIL` **or a missing or empty `Tailscale-User-Login` header** (local processes). Localhost-only routes (`POST /api/today/cards`, the plugin routes) refuse any Tailscale header and require `X-DeerQuest-Token`.
 - **DeerQuest Automation**: systemd timers run LLM-driven jobs on personal data. `intake.py` runs tesseract/pdftotext on uploaded files. Sources shell out to `gh` and calendar tools. LLM output and email content are untrusted (prompt injection).
-- **Hermes Plugins**: JS loaded by the Hermes desktop app. They call the gateway's `shell.exec` RPC with command strings built from a scripts path and arguments (`session-usage/plugin.js` ~L489-496, `opencode-usage/plugin.js`). Model names, session data and models.dev registry data are inputs.
-- **Hermes Gateway Scripts**: Python run on the gateway. They read the `OPENCODE_GO_API_KEY*` env and credential pool and call OpenCode Go and models.dev.
+- **Hermes Plugins**: JS loaded by the Hermes desktop app. Session Usage and OpenCode Go Usage call the gateway's `shell.exec` RPC with command strings built from a scripts path and arguments. DeepSeek Rate and Session Usage fetch session data through `session.stats` or `session.usage`. Model names, session data and models.dev registry data are inputs.
+- **Hermes Gateway Scripts**: Python run on the gateway. The OpenCode Go scripts read `OPENCODE_GO_API_KEY*` values and the credential pool and call OpenCode endpoints. The pricing and model scripts read Hermes's local models.dev registry cache rather than calling models.dev directly.
 
 ## Assets (all marked critical by the owner) **[owner]**
 
@@ -44,7 +44,7 @@ Scratch and dev code, which is lower priority: wiz101 `backend/_*.py`, DeerQuest
 
 - Localhost binds (wiz101 by default; DeerQuest always), Tailscale identity header check, DeerQuest shared token for local writer and plugin routes, and the FastAPI CORS allowlist.
 - wiz101 uses parameterized SQLite queries in `database.py` (verify per finding) and rejects ambiguous wiki binds with 409.
-- Hermes plugins quote command arguments before `shell.exec` (see comments about cmd quoting).
+- Session Usage quotes the script path and arguments before `shell.exec`. OpenCode Go Usage quotes the script path and validates its argument tokens before passing them unquoted.
 
 ## Out of scope and accepted risk
 
