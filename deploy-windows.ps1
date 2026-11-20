@@ -109,7 +109,7 @@ foreach ($id in $pluginIds) {
         Write-Host "unchanged $dest"
     } else {
         [System.IO.File]::WriteAllText($dest, $content, $utf8NoBom)
-        $hash = (Get-FileHash -Algorithm SHA256 -Path $dest).Hash
+        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dest).Hash
         Write-Host "wrote $dest"
         Write-Host "  sha256 $hash"
     }

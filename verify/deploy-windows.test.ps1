@@ -48,6 +48,23 @@ try {
     Assert ($unchanged.Count -eq 3 -and $output -notmatch '(?m)^wrote ') 'Second deploy did not report all plugins unchanged'
     Write-Host 'PASS: second deploy reports unchanged (3 plugins)'
 
+    $bracketApp = Join-Path $root 'plugins[42]'
+    $output = Deploy @('-AppDir', $bracketApp, '-ScriptsDir', $scripts)
+    Check-Files $bracketApp $ids $literal
+    $hashes = [regex]::Matches($output, '(?m)^  sha256 ([0-9A-Fa-f]{64})\r?$')
+    Assert ($hashes.Count -eq $ids.Count) 'Bracket AppDir did not print three 64-hex SHA256 hashes'
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        for ($i = 0; $i -lt $ids.Count; $i++) {
+            $path = Join-Path (Join-Path $bracketApp $ids[$i]) 'plugin.js'
+            $expectedHash = [BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($path))).Replace('-', '')
+            Assert ($hashes[$i].Groups[1].Value -eq $expectedHash) "Wrong SHA256 for $($ids[$i]) in bracket AppDir"
+        }
+    } finally {
+        $sha.Dispose()
+    }
+    Write-Host "PASS: bracket AppDir prints three matching literal-file SHA256 hashes (PowerShell $($PSVersionTable.PSVersion))"
+
     $only = Join-Path $root 'only'
     $null = Deploy @('-AppDir', $only, '-ScriptsDir', $scripts, '-Only', 'session-usage')
     Check-Files $only @('session-usage') $literal
