@@ -8,6 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
+import { gunzipSync } from 'node:zlib'
 import * as sdk from '@hermes/plugin-sdk'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -26,12 +27,22 @@ const pluginSource = fs.readFileSync(path.join(SRC, 'opencode-usage', 'plugin.js
 fs.writeFileSync(COPY, pluginSource.replaceAll('__HERMES_SCRIPTS__', SCRIPTS_DIR))
 
 const calls = []
+let modelsPayload = null
+function readModelsPayload(stdout) {
+  try {
+    const envelope = JSON.parse(stdout)
+    return envelope.gzip ? JSON.parse(gunzipSync(Buffer.from(envelope.gzip, 'base64')).toString('utf8')) : envelope
+  } catch {
+    return null
+  }
+}
 sdk.setRpc(async (method, params) => {
   if (method !== 'shell.exec') return {}
   const command = String((params && params.command) || '')
   calls.push(command)
   try {
     const stdout = execFileSync('/bin/sh', ['-lc', command], { encoding: 'utf8', timeout: 45000, stdio: ['ignore', 'pipe', 'pipe'] })
+    if (command.includes('opencode_go_models.py')) modelsPayload = readModelsPayload(stdout) || modelsPayload
     return { stdout, stderr: '', code: 0 }
   } catch (e) {
     return { stdout: String(e.stdout || ''), stderr: String(e.stderr || e.message), code: e.status == null ? 1 : e.status }
@@ -97,20 +108,26 @@ const table = out.text.match(/Models on Go.{0,700}/)
 console.log('\nTABLE:', table ? table[0] : '(no table)')
 
 // The three things this render must prove against the real script: a ZDR column
-// and a Released column exist, and an OpenCode announcement (with no docs row
-// behind it) is named.
+// and a Released column exist, and every announcement the script returned (a cap
+// or offer OpenCode posted on X, with no docs row behind it) is named. Which
+// announcements are live depends on what Go serves today, so the expected lines
+// come from the script's own payload rather than a hardcoded model.
 const zdrHeader = /Model\s+Released\s+In\s+Out\s+Cache\s+Cap\s+≈ Req\/mo\s+ZDR/.test(out.text)
 const zdrCells = { zero: (out.text.match(/\b0d\b/g) || []).length, thirty: (out.text.match(/\b30d\b/g) || []).length, no: (out.text.match(/\bNo\b/g) || []).length }
 const dated = (out.text.match(/[A-Z][a-z]{2} \d{1,2}, \d{4}/g) || []).length
-const announcement = /Omen Alpha — Go-only stealth model: \$100 of usage on the \$10 plan \(announced Sep 4, 2026\)/.test(out.text)
+const announcements = (modelsPayload && modelsPayload.announcements) || []
+const missingAnnouncements = announcements
+  .filter(a => !out.text.includes(a.name + ' — ' + a.note + ' (announced '))
+  .map(a => a.name)
 console.log('ZDR column header:', zdrHeader, JSON.stringify(zdrCells))
 console.log('released dates rendered:', dated)
-console.log('Omen Alpha announcement:', announcement)
+console.log('models payload decoded:', Boolean(modelsPayload))
+console.log('announcements in payload:', announcements.length, 'missing from page:', JSON.stringify(missingAnnouncements))
 console.log('all-null model named under the table:', /Served, no published price: /.test(out.text))
-const ok = /Models on Go/.test(out.text) && zdrHeader && dated >= 10 && announcement
+const ok = /Models on Go/.test(out.text) && zdrHeader && dated >= 10 && Boolean(modelsPayload) && !missingAnnouncements.length
 console.log('\nVERDICT:', ok
   ? 'table rendered'
-  : 'models section missing the ZDR/Released columns, the dates, or the Omen Alpha announcement')
+  : 'models section missing the ZDR/Released columns, the dates, or an announcement the script returned')
 
 globalThis.setInterval = realSetInterval
 process.exit(ok ? 0 : 1)
