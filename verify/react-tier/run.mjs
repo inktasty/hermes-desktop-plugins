@@ -236,6 +236,29 @@ async function testSessionRateRace({ container, calls, pendingPrices }) {
   console.log('rate race regression: ' + (passes - before) + '/6 passed')
 }
 
+async function testContextRunway({ container, state, calls, setStatsPayload }) {
+  const chip = () => container.querySelector('button')
+  check('context runway mounts without inventing context', chip().textContent === 'Context · —')
+  setStatsPayload({ ...STATS_PAYLOAD, last_prompt_tokens: 650, context_length: 1000, compression_count: 0 })
+  await settle(() => state.activeSessionId.set('synthetic-primary'))
+  check('context runway shows the cold stats sample', chip().textContent === 'Context · 35% left' && calls.length === 1)
+  await settle(() => state.focusedUsage.set({ context_used: 900, context_max: 1000, compressions: 0 }))
+  check('context runway subscribes to streamed context', chip().textContent === 'Context · 10% left')
+  await settle(() => state.focusedUsage.set({ context_used: 300, context_max: 1000, compressions: 1 }))
+  check('context runway rerenders after compression', chip().textContent === 'Context · 70% left')
+  await settle(() => chip().click())
+  const panel = container.querySelector('[data-prim="PopoverContent"]')
+  check('context runway opens a chart with the compression and token count',
+    panel?.textContent.includes('700 tokens left') && panel.textContent.includes('1 compression') && panel.querySelector('svg'))
+  await settle(() => chip().click())
+  check('context runway closes its popover from the chip', !container.querySelector('[data-prim="PopoverContent"]'))
+  setStatsPayload(STATS_PAYLOAD)
+  await settle(() => state.focusedSessionId.set('synthetic-secondary'))
+  check('context runway clears old session context even before live usage changes', chip().textContent === 'Context · —')
+  await settle(() => state.focusedUsage.set({ context_used: 200, context_max: 1000 }))
+  check('context runway follows the new focus', chip().textContent === 'Context · 80% left' && calls.length === 2)
+}
+
 async function testOpencodeUsage({ container, calls, beforeMountTimers, failRpc }) {
   check('opencode-usage mount effect fetches models', calls.some(c => (
     c.params?.command?.includes('opencode_go_models')
@@ -320,6 +343,7 @@ await mountAndTest('session-usage', testSessionUsage)
 await mountAndTest('session-usage', testSessionStatsPolling, true)
 await mountAndTest('session-usage', testSessionProviders, 'providers')
 await mountAndTest('session-usage', testSessionRateRace, 'race')
+await mountAndTest('context-runway', testContextRunway, true)
 await mountAndTest('opencode-usage', testOpencodeUsage)
 globalThis.setInterval = originalInterval
 globalThis.clearInterval = originalClear

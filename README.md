@@ -1,6 +1,6 @@
-# Hermes desktop plugins: DeepSeek Rate, OpenCode Go Usage, Session Usage
+# Hermes desktop plugins: DeepSeek Rate, OpenCode Go Usage, Session Usage, Context Runway
 
-Three single-file plugins for the [Hermes desktop app](https://hermes-agent.nousresearch.com/docs).
+Single-file plugins for the [Hermes desktop app](https://hermes-agent.nousresearch.com/docs).
 No build step: each is one plain-JavaScript ESM file the app loads and hot-reloads
 from disk.
 
@@ -9,6 +9,7 @@ from disk.
 | `deepseek-rate` | A status-bar chip showing whether DeepSeek is billing peak (2x) or off-peak right now, in the viewer's own clock. Colors only while a DeepSeek model is active in the focused session. |
 | `opencode-usage` | A status-bar chip plus a full page: the three OpenCode Go quota windows (5-hour, weekly, monthly) with usage vs. time-elapsed gauges, pace projections, reset countdowns, a Console button, and a models table with per-model prices, caps, promotions, and registry release dates. More than one OpenCode Go key on the gateway — a credential pool with a second key — gets its own set of windows per key. A key the pool has benched (`exhausted`, `invalid`, ...) is folded to one line with a chevron and its own used-share; click it to unfold that key's windows. Keys are numbered by position (`Key 1`, `Key 2`) instead of carrying whatever name the gateway config happens to use, and the chip says which one it is reporting: `Go (2/2) 16/9/9%`. A **Settings** section on the page chooses what the chip reports (the key in use, the combined pool, or one specific key) along with the refresh interval, the amber threshold, and whether the gateway's own credential names are shown. |
 | `session-usage` | A status-bar chip showing the focused session's cost, with a hover panel of tokens, cache-hit rate, API calls, context use, the model's registry release date, and the current model's per-1M-token rates. |
+| `context-runway` | A status-bar chip showing how much context is left in the focused session. Open it to see remaining tokens and a short history with compression markers when the gateway reports them. History stays in memory and starts over when focus changes. |
 
 ## Requirements
 
@@ -29,7 +30,7 @@ Easiest path: paste this one line into your Hermes agent and it does the whole
 thing.
 
 ```text
-Install the desktop plugins in https://github.com/inktasty/hermes-desktop-plugins: clone the repo, follow its README, run ./install.sh (pass HERMES_HOME if the gateway home is not the default: ~/.hermes, or %LOCALAPPDATA%\hermes on a Windows gateway) so the plugins point at the gateway's scripts and land in the desktop-plugins folder on the machine running the app, then reload desktop plugins and confirm all three loaded.
+Install the desktop plugins in https://github.com/inktasty/hermes-desktop-plugins: clone the repo, follow its README, run ./install.sh (pass HERMES_HOME if the gateway home is not the default: ~/.hermes, or %LOCALAPPDATA%\hermes on a Windows gateway) so the plugins point at the gateway's scripts and land in the desktop-plugins folder on the machine running the app, then reload desktop plugins and confirm they all loaded.
 ```
 
 By hand instead:
@@ -203,7 +204,7 @@ With a remote gateway, run it on each machine, from that machine's clone:
 - **App machine (Windows):** `./uninstall.sh` from Git Bash removes the plugin
   files under `%LOCALAPPDATA%\hermes\desktop-plugins\`; its gateway-script
   lines print `absent`, since the scripts live on the gateway. Without Git Bash,
-  delete `plugin.js` from the three `<id>` folders there by hand.
+  delete `plugin.js` from each plugin's `<id>` folder there by hand.
 
 ## Verify before trusting it
 
@@ -234,7 +235,7 @@ lines tagged `[plugins]`. A successful load is silent; `runtime load failed
 
 ## Contributing a plugin
 
-Pull requests are welcome. A plugin lands in the same shape as the three here, and
+Pull requests are welcome. A plugin lands in the same shape as the ones here, and
 the shape is what keeps them cheap to load:
 
 - `desktop-plugins/<id>/plugin.js`, one file, no build step, the folder name equal

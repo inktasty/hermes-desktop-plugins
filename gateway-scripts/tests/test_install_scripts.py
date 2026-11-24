@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-PLUGIN_IDS = ("deepseek-rate", "opencode-usage", "session-usage")
+PLUGIN_IDS = ("deepseek-rate", "opencode-usage", "session-usage", "context-runway")
 GATEWAY_SCRIPTS = ("model_price_lookup.py", "opencode_go_usage.py", "opencode_go_models.py")
 
 

@@ -1,4 +1,4 @@
-// Offline harness for the three disk plugins: real file import, stub SDK,
+// Offline harness for the disk plugins: real file import, stub SDK,
 // hook-count oracle, import-scan check, and a clock sweep against an
 // independently written peak-tier oracle.
 import fs from 'node:fs'
@@ -2262,9 +2262,79 @@ async function testOpencodeRefreshRace() {
   console.log('overlapping refresh regression: ' + (passes - before) + '/12 passed')
 }
 
+async function testContextRunway() {
+  console.log('--- context-runway')
+  const { mod, bad, canonHash, localHash } = await loadPlugin('context-runway')
+  check('context runway plugin id and loader contract', mod.id === 'context-runway' && bad.length === 0 && canonHash === localHash)
+  const { ctx, contributions, disposers } = captureCtx()
+  const { focusedSessionId, activeSessionId, focusedUsage } = sdk.host.state
+  const frame = (used, compressions, total = used) => ({
+    context_used: used, context_max: 1000, compressions, total
+  })
+  const target = suffix => 'synthetic-runway-' + suffix
+  const methods = []
+  let finish
+  sdk.setRpc((method, { session_id }) => {
+    methods.push(method)
+    if (session_id === target('late')) return new Promise(resolve => { finish = resolve })
+    if (session_id === target('live-wins')) return new Promise(resolve => { finish = resolve })
+    if (session_id === target('legacy')) {
+      if (method === 'session.stats') throw Object.assign(new Error('Method not found'), { code: -32601 })
+      if (method === 'session.usage') return frame(200, 0)
+    }
+    return { last_prompt_tokens: 0, context_length: 1000 }
+  })
+  focusedSessionId.set(null)
+  activeSessionId.set(null)
+  focusedUsage.set(null)
+  mod.register(ctx)
+  const chip = contributions.find(c => c.area === sdk.STATUSBAR_AREAS.right && c.id === 'chip')
+  check('context runway registers a right status-bar chip', Boolean(chip))
+  if (!chip) return
+  const read = () => render(chip.render)
+  const stats = (last_prompt_tokens, compression_count) => ({ last_prompt_tokens, context_length: 1000, compression_count })
+  await settle()
+  check('no focused session is neutral with no RPC', read().text.includes('Focus a session') && methods.length === 0)
+  activeSessionId.set(target('missing'))
+  await settle()
+  check('unknown context is not reported as empty', read().text.includes('has not reported a context size') && !read().text.includes('100% left'))
+  focusedSessionId.set(target('legacy'))
+  await settle()
+  check('legacy context is read for the focused session rather than the primary', read().text.includes('80% left') && methods.slice(-2).join() === 'session.stats,session.usage')
+  focusedUsage.set(frame(910, 0))
+  await settle()
+  check('low context shows remaining rather than used percentage', read().text.includes('9% left'))
+  focusedUsage.set(frame(300, 1, 200))
+  await settle()
+  check('compression increases headroom and marks history even with a lower token counter', read().text.includes('70% left') && /3 samples.*1 compression\b/.test(read().text))
+  focusedUsage.set(frame(940, 0))
+  await settle()
+  check('a pre-compression sample cannot undo recovery', read().text.includes('70% left') && read().text.includes('3 samples'))
+  for (let used = 310; used <= 590; used += 10) {
+    focusedUsage.set(frame(used, 1))
+    await settle()
+  }
+  check('context history retains only its most recent samples', read().text.includes('20 samples') && read().text.includes('41% left'))
+  focusedSessionId.set(target('late'))
+  await settle()
+  check('focus change immediately hides the previous context', read().text.includes('Context · —') && !read().text.includes('41% left'))
+  const finishPrevious = finish
+  focusedSessionId.set(target('live-wins'))
+  await settle()
+  focusedUsage.set(frame(450, 0))
+  await settle()
+  finish(stats(100, 0))
+  finishPrevious(stats(999, 0))
+  await settle()
+  check('late cold baselines cannot replace live data or cross focus', read().text.includes('55% left') && read().text.includes('1 sample'))
+  check('context runway calls only existing session RPCs', methods.every(m => m === 'session.stats' || m === 'session.usage'))
+  disposers.forEach(dispose => dispose())
+}
+
 // ---------------------------------------------------------------------------
 await testDeepseekRate()
 await testSessionUsage()
+await testContextRunway()
 await testOpencodeUsage()
 await testSpoolTransport()
 await testPythonFallback()

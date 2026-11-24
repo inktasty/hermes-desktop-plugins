@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Uninstall the three Hermes desktop plugins, and the gateway scripts they call.
+# Uninstall the Hermes desktop plugins, and the gateway scripts they call.
 #
 #   ./uninstall.sh                          # app plugin folder defaults per-OS
 #   ./uninstall.sh /path/to/desktop-plugins # point it at the app folder directly
@@ -19,7 +19,7 @@ case "$(uname -s)" in
   *) DEFAULT_HERMES_HOME="$HOME/.hermes" ;;
 esac
 HERMES_HOME=${HERMES_HOME:-$DEFAULT_HERMES_HOME}
-PLUGIN_IDS="deepseek-rate opencode-usage session-usage"
+PLUGIN_IDS="deepseek-rate opencode-usage session-usage context-runway"
 GATEWAY_SCRIPTS="model_price_lookup.py opencode_go_usage.py opencode_go_models.py"
 
 # The APP's plugin folder -- deliberately NOT derived from HERMES_HOME (see

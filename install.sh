@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the three Hermes desktop plugins, and the gateway scripts they call.
+# Install the Hermes desktop plugins, and the gateway scripts they call.
 #
 #   ./install.sh                          # app plugin folder defaults per-OS
 #   ./install.sh /path/to/desktop-plugins # point it at the app folder directly
@@ -15,7 +15,7 @@ case "$(uname -s)" in
 esac
 HERMES_HOME_EXPLICIT=${HERMES_HOME:+1}   # set only when the caller supplied one
 HERMES_HOME=${HERMES_HOME:-$DEFAULT_HERMES_HOME}
-PLUGIN_IDS="deepseek-rate opencode-usage session-usage"
+PLUGIN_IDS="deepseek-rate opencode-usage session-usage context-runway"
 # Shipped placeholder inside the plugins; replaced with this gateway's scripts path.
 SCRIPTS_TOKEN="__HERMES_SCRIPTS__"
 
