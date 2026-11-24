@@ -462,7 +462,7 @@ async function testDeepseekRate() {
   mod.register(ctx)
   restoreTimers()
 
-  check('registers exactly one contribution', contributions.length === 1, String(contributions.length))
+  check('registers exactly the chip, planner route and palette command', contributions.length === 3, String(contributions.length))
   const chip = contributions[0]
   check('chip in statusBar.right', chip && chip.area === 'statusBar.right', chip && chip.area)
   check('chip render is a function', typeof chip.render === 'function')
@@ -606,6 +606,69 @@ async function testDeepseekRate() {
   console.log('    weekend tooltip:', wkTip && String(wkTip.props.label))
   console.log('    TZ:', process.env.TZ || Intl.DateTimeFormat().resolvedOptions().timeZone)
   Date.now = realNow
+}
+
+async function testDeepseekWindowPlanner() {
+  console.log('--- deepseek window planner')
+  const { mod, ns } = await loadPlugin('deepseek-rate', { fresh: 'planner' })
+  const { ctx, contributions } = captureCtx()
+  const { focusedSessionId, activeSessionId } = sdk.host.state
+  focusedSessionId.set(null)
+  activeSessionId.set(null)
+  const requestsBefore = sdk.requests.length
+  const utc = Date.UTC
+  const weekStart = utc(2026, 8, 18, 10) // Friday: first minute of the weekend window
+  const weekendEnd = utc(2026, 8, 21, 1)
+  const windows = ns.offPeakWindows
+  const wedFour = utc(2026, 8, 16, 4)
+  check('planner admits exact weekday fit, not a minute more',
+    windows(wedFour - 60000, 120)[0]?.start === wedFour &&
+    windows(wedFour, 120)[0]?.end === utc(2026, 8, 16, 6) &&
+    windows(wedFour + 60000, 120)[0]?.start === utc(2026, 8, 16, 10))
+  check('planner keeps the full weekend as one continuous 63-hour window',
+    JSON.stringify(windows(weekStart, 63 * 60)) === JSON.stringify([{ start: weekStart, end: weekendEnd }]))
+  check('planner finds no match for a task longer than any window', windows(weekStart, 63 * 60 + 1).length === 0)
+  check('planner clips the currently open window at now',
+    windows(weekStart + 60000, 90)[0]?.start === weekStart + 60000)
+
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+  for (const [start, springZone] of [
+    [utc(2026, 2, 1, 12), 'America/Los_Angeles'],
+    [utc(2026, 8, 27, 12), 'Australia/Sydney']
+  ]) {
+    const hours = zone === springZone ? 167 : 168
+    check('planner horizon is seven local days in ' + zone + ' across the ' + springZone + ' clock change',
+      windows(start, 90).at(-1)?.end === start + hours * 3600000)
+  }
+  for (const friday of [utc(2026, 2, 6, 10), utc(2026, 9, 2, 10)]) {
+    const span = windows(friday, 63 * 60)[0]
+    check('clock changes do not shorten a UTC billing weekend in ' + zone,
+      span?.start === friday && span.end - span.start === 63 * 3600000)
+  }
+
+  stubTimers()
+  Date.now = () => weekStart
+  try {
+    mod.register(ctx)
+    const page = contributions.find(c => c.area === sdk.ROUTES_AREA && c.id === 'planner')
+    const command = contributions.find(c => c.area === sdk.PALETTE_AREA && c.id === 'open-planner')
+    command?.data.run()
+    check('planner palette command navigates to registered route', Boolean(page) && sdk.navigations.at(-1) === page?.data.path)
+    if (!page) return
+    const out = render(page.render)
+    const times = out.els.filter(el => el.tag === 'time')
+    const localDate = new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+    const hasDate = (el, instant) => el?.props.dateTime === new Date(instant).toISOString() &&
+      localDate.formatToParts(instant).filter(part => part.type !== 'literal').every(part => el.props.children.includes(part.value))
+    check('planner labels both local dates for a window crossing local midnight in ' + zone,
+      localDate.format(weekStart) !== localDate.format(weekendEnd) && hasDate(times[0], weekStart) && hasDate(times[1], weekendEnd))
+    check('planner publishes its timezone and latest start for the default task', out.text.includes(zone) &&
+      times[2]?.props.dateTime === new Date(weekendEnd - 90 * 60000).toISOString())
+    check('planner can open and render without making a gateway request', sdk.requests.length === requestsBefore)
+  } finally {
+    Date.now = realNow
+    restoreTimers()
+  }
 }
 
 // ============================================================ session-usage ==
@@ -2264,6 +2327,7 @@ async function testOpencodeRefreshRace() {
 
 // ---------------------------------------------------------------------------
 await testDeepseekRate()
+await testDeepseekWindowPlanner()
 await testSessionUsage()
 await testOpencodeUsage()
 await testSpoolTransport()

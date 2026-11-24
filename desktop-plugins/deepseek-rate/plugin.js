@@ -22,10 +22,13 @@
 // `host` is an SDK export, not a renderer global. Using it unimported throws a
 // ReferenceError inside the render path, which the defensive readers swallow —
 // the chip then renders neutral forever with no visible error.
-import { atom, Badge, host, STATUSBAR_AREAS, Tip, useValue } from '@hermes/plugin-sdk'
+import { atom, Badge, host, PALETTE_AREA, ROUTES_AREA, STATUSBAR_AREAS, Tip, useValue } from '@hermes/plugin-sdk'
+import { useEffect, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'deepseek-rate'
+const PLANNER_ROUTE = '/deepseek-window-planner'
+const MINUTE_MS = 60000
 
 // The tier only changes on a UTC hour boundary, so a cheap local tick is exact
 // enough to land the flip within seconds of the boundary without any polling.
@@ -105,6 +108,151 @@ function nextChangeAt(ms) {
 
 function snapshot(ms) {
   return { peak: isPeak(ms), weekend: isWeekend(ms), nextChangeAt: nextChangeAt(ms), at: ms }
+}
+
+export function offPeakWindows(now, minutes) {
+  if (!Number.isSafeInteger(minutes) || minutes < 1) return []
+  const until = new Date(now)
+  until.setDate(until.getDate() + 7)
+  const windows = []
+  for (let start = now; start < +until;) {
+    const end = Math.min(nextChangeAt(start) ?? +until, +until)
+    if (!isPeak(start) && end - start >= minutes * MINUTE_MS) windows.push({ start, end })
+    start = end
+  }
+  return windows
+}
+
+const plannerTime = new Intl.DateTimeFormat(undefined, {
+  weekday: 'short', month: 'short', day: 'numeric',
+  hour: 'numeric', minute: '2-digit', timeZoneName: 'short'
+})
+
+function durationLabel(minutes) {
+  const hours = Math.floor(minutes / 60)
+  const remainder = minutes % 60
+  return [hours && hours + ' h', remainder && remainder + ' min'].filter(Boolean).join(' ')
+}
+
+function WindowPlanner() {
+  const [duration, setDuration] = useState('90')
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), MINUTE_MS)
+    return () => clearInterval(timer)
+  }, [])
+
+  const minutes = Number(duration)
+  const valid = Number.isSafeInteger(minutes) && minutes > 0
+  const windows = offPeakWindows(now, minutes)
+  const time = ms => jsx('time', { dateTime: new Date(ms).toISOString(), children: plannerTime.format(ms) })
+  const zone = plannerTime.resolvedOptions().timeZone
+  const panel = { border: '1px solid var(--ui-stroke-secondary)', borderRadius: 12, background: 'var(--ui-bg-elevated)' }
+
+  return jsx('div', {
+    className: 'h-full overflow-y-auto',
+    children: jsxs('main', {
+      style: { maxWidth: 780, margin: '0 auto', padding: '32px clamp(12px, 4vw, 28px)', display: 'grid', gap: 20 },
+      children: [
+        jsxs('header', {
+          style: { display: 'grid', gap: 6 },
+          children: [
+            jsx('div', {
+              className: 'text-xs font-semibold text-(--ui-text-secondary)',
+              style: { letterSpacing: '0.12em' },
+              children: 'DEEPSEEK RATE'
+            }),
+            jsx('h1', { className: 'font-semibold text-foreground', style: { fontSize: 27, lineHeight: 1.2 }, children: 'DeepSeek Window Planner' }),
+            jsx('p', {
+              className: 'text-sm text-(--ui-text-secondary)',
+              children: 'Find off-peak windows that fit your whole task over the next seven days.'
+            })
+          ]
+        }),
+        jsxs('section', {
+          style: { ...panel, padding: 16, display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'end', gap: 14 },
+          children: [
+            jsxs('label', {
+              className: 'text-sm font-semibold text-foreground',
+              style: { display: 'grid', gap: 6 },
+              children: [
+                'Task duration (minutes)',
+                jsx('input', {
+                  type: 'number', min: 1, step: 1, value: duration,
+                  'aria-invalid': !valid,
+                  onChange: event => setDuration(event.target.value),
+                  className: 'text-sm tabular-nums',
+                  style: {
+                    width: 155, padding: '7px 10px', borderRadius: 6,
+                    border: '1px solid var(--ui-stroke-secondary)', background: 'var(--background)'
+                  }
+                })
+              ]
+            }),
+            jsxs('div', {
+              className: 'text-xs text-(--ui-text-secondary)',
+              style: { display: 'grid', gap: 4 },
+              children: [
+                jsx('span', { children: 'Times are shown in your local time' }),
+                jsx('strong', { className: 'text-foreground', children: zone })
+              ]
+            })
+          ]
+        }),
+        jsxs('section', {
+          style: { display: 'grid', gap: 10 },
+          children: [
+            jsxs('div', {
+              className: 'flex items-baseline justify-between gap-2',
+              children: [
+                jsx('h2', { className: 'text-sm font-semibold text-foreground', children: 'Matching off-peak windows' }),
+                jsx('span', {
+                  'aria-live': 'polite', className: 'text-xs text-(--ui-text-secondary)',
+                  children: valid ? windows.length + (windows.length === 1 ? ' match' : ' matches') : ''
+                })
+              ]
+            }),
+            windows.length ? jsx('ol', {
+              style: { display: 'grid', gap: 8 },
+              children: windows.map(({ start, end }, i) => jsxs('li', {
+                style: {
+                  ...panel, padding: 14, display: 'flex', flexWrap: 'wrap',
+                  alignItems: 'center', justifyContent: 'space-between', gap: 10,
+                  borderInlineStart: i === 0 ? '3px solid var(--ui-green)' : panel.border
+                },
+                children: [
+                  jsxs('div', {
+                    style: { display: 'grid', gap: 4 },
+                    children: [
+                      i === 0 ? jsx('span', {
+                        className: 'text-xs font-semibold', style: { color: 'var(--ui-green)' }, children: 'First available'
+                      }) : null,
+                      jsxs('div', {
+                        className: 'text-sm font-semibold text-foreground',
+                        children: [time(start), ' → ', time(end)]
+                      }),
+                      jsxs('div', {
+                        className: 'text-xs text-(--ui-text-secondary)',
+                        children: ['Start by ', time(end - minutes * MINUTE_MS)]
+                      })
+                    ]
+                  }),
+                  jsx('span', {
+                    className: 'text-xs tabular-nums text-(--ui-text-secondary)',
+                    children: durationLabel(Math.floor((end - start) / MINUTE_MS)) + ' available'
+                  })
+                ]
+              }, start))
+            }) : jsx('p', {
+              role: 'status', className: 'text-sm text-(--ui-text-secondary)', style: { ...panel, padding: 16 },
+              children: valid ? 'No window fits that duration in the next seven days. Try a shorter task.'
+                : 'Enter a positive whole number of minutes.'
+            })
+          ]
+        })
+      ]
+    })
+  })
 }
 
 // Hour only, 12-hour clock: "3 AM", "Mon 11 PM".
@@ -281,11 +429,19 @@ export default {
     }
     if (typeof ctx.onDispose === 'function') ctx.onDispose(dispose)
 
-    ctx.register({
-      id: 'chip',
-      area: STATUSBAR_AREAS.right,
-      order: 30,
-      render: () => jsx(RateChip, {})
-    })
+    ctx.registerMany([
+      { id: 'chip', area: STATUSBAR_AREAS.right, order: 30, render: () => jsx(RateChip, {}) },
+      { id: 'planner', area: ROUTES_AREA, data: { path: PLANNER_ROUTE }, render: () => jsx(WindowPlanner, {}) },
+      {
+        id: 'open-planner',
+        area: PALETTE_AREA,
+        data: {
+          id: 'deepseekRate.openPlanner',
+          label: 'DeepSeek: Open Window Planner',
+          keywords: ['deepseek', 'off-peak', 'billing', 'schedule'],
+          run: () => host.navigate(PLANNER_ROUTE)
+        }
+      }
+    ])
   }
 }
