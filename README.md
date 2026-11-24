@@ -11,6 +11,10 @@ from disk.
 | `session-usage` | A status-bar chip showing the focused session's cost, with a hover panel of tokens, cache-hit rate, API calls, context use, the model's registry release date, and the current model's per-1M-token rates. |
 | `context-runway` | A status-bar chip showing how much context is left in the focused session. Open it to see remaining tokens and a short history with compression markers when the gateway reports them. History stays in memory and starts over when focus changes. |
 
+## Context Runway
+
+![Context Runway chip and open history popover with a compression marker, shown with generated data.](docs/images/context-runway.png)
+
 ## Requirements
 
 - The Hermes desktop app, build of upstream commit `6c3d4a4af70` or later.
