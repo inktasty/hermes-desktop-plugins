@@ -5,10 +5,10 @@ import { JSDOM } from 'jsdom'
 
 register('./resolve.mjs', import.meta.url)
 const { act, createElement } = await import('react')
-const { createRoot } = await import('react-dom/client')
 const sdk = await import('./sdk.mjs')
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'https://synthetic.invalid' })
 Object.assign(globalThis, { window: dom.window, document: dom.window.document, IS_REACT_ACT_ENVIRONMENT: true })
+const { createRoot } = await import('react-dom/client')
 const source = process.env.PLUGIN_SRC
   ? path.resolve(process.env.PLUGIN_SRC)
   : fileURLToPath(new URL('../../desktop-plugins/', import.meta.url))
@@ -53,7 +53,7 @@ const settle = fn => act(async () => {
   for (let i = 0; i < 30; i++) await Promise.resolve()
 })
 
-async function mountAndTest(name, test, canonicalStats = false) {
+async function mountAndTest(name, test, canonicalStats = false, entryId = name === 'opencode-usage' ? 'page' : 'chip') {
   const entries = []
   const disposers = []
   const container = document.createElement('div')
@@ -102,7 +102,7 @@ async function mountAndTest(name, test, canonicalStats = false) {
       onDispose: fn => disposers.push(fn),
       storage: { get: () => null, set() {} }
     }))
-    const entry = entries.find(e => e.id === (name === 'opencode-usage' ? 'page' : 'chip'))
+    const entry = entries.find(e => e.id === entryId)
     const beforeMountTimers = timers.size
     await settle(() => root.render(createElement(entry.render)))
     await test({
@@ -146,6 +146,35 @@ async function testDeepseekRate({ container, state, failRpc }) {
   failRpc()
   await settle(() => state.focusedSessionId.set('synthetic-failure'))
   check('deepseek-rate failed poll stays neutral', badge().dataset.variant === neutral)
+}
+
+async function testDeepseekWindowPlanner({ container, calls }) {
+  const input = container.querySelector('input')
+  const setValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+  const enter = value => settle(() => {
+    setValue.call(input, value)
+    input.dispatchEvent(new window.Event('input', { bubbles: true }))
+  })
+  const firstWindow = () => container.querySelector('li time')?.dateTime
+  check('planner displays its default task and matching windows', input.value === '90' && Boolean(firstWindow()))
+  await enter('3781')
+  check('planner updates to a no-match state for a longer task', !firstWindow() && container.textContent.includes('No window fits'))
+  await enter('')
+  check('planner distinguishes invalid input from no matches', input.getAttribute('aria-invalid') === 'true' &&
+    container.textContent.includes('Enter a positive whole number'))
+  await enter('90')
+  check('planner restores matching windows when duration changes', Boolean(firstWindow()))
+  const previous = Date.now
+  const clock = [...timers.values()].find(timer => timer.ms === 60000)
+  try {
+    const start = Date.UTC(2026, 8, 18, 12, 30)
+    Date.now = () => start
+    await settle(() => clock?.fn())
+    check('planner clock refreshes the start of the in-progress window', firstWindow() === new Date(start).toISOString())
+  } finally {
+    Date.now = previous
+  }
+  check('planner mount and interaction make no RPCs', calls.length === 0)
 }
 
 async function testSessionUsage({ container, state, calls, failRpc, setSessionPayload }) {
@@ -316,6 +345,7 @@ await testRestoredModels('missing timestamp', undefined, true)
 await testRestoredModels('invalid timestamp', 'not-a-date', true)
 await testRestoredModels('failed refresh', new Date(Date.now() - 7 * 3600000).toISOString(), true, true)
 await mountAndTest('deepseek-rate', testDeepseekRate)
+await mountAndTest('deepseek-rate', testDeepseekWindowPlanner, false, 'planner')
 await mountAndTest('session-usage', testSessionUsage)
 await mountAndTest('session-usage', testSessionStatsPolling, true)
 await mountAndTest('session-usage', testSessionProviders, 'providers')
