@@ -73,6 +73,13 @@ function focusedSid() {
   }
 }
 
+// Canonical gateways scope `shell.exec` to one live local session; legacy
+// gateways reject that extra parameter instead. Probe the sessionless legacy
+// form once, then remember which wire this backend speaks.
+function isInvalidParams(e) {
+  return Boolean(e) && (e.code === 4001 || (e.data && e.data.reason === 'invalid_params') || /invalid_params/i.test(String(e.message || e)))
+}
+
 // ---- Formatting -------------------------------------------------------------
 
 function fmtTokens(n) {
@@ -472,7 +479,27 @@ export default {
     const pendingRates = new Map()
     const costData = atom({})   // { [sid]: { usd, peak, provider, model, ... } } estimated spend
     let usageMethod = null
+    let shellNeedsSession = null
     let usageGeneration = 0
+
+    async function shellRequest(command) {
+      const base = { command }
+      const sid = focusedSid()
+      if (shellNeedsSession === true) {
+        if (!sid) throw new Error('this gateway requires an active local session before shell.exec can run gateway scripts')
+        return host.request('shell.exec', { ...base, session_id: sid })
+      }
+      try {
+        const resp = await host.request('shell.exec', base)
+        if (shellNeedsSession == null) shellNeedsSession = false
+        return resp
+      } catch (e) {
+        if (!isInvalidParams(e)) throw e
+        shellNeedsSession = true
+        if (!sid) throw new Error('this gateway requires an active local session before shell.exec can run gateway scripts')
+        return host.request('shell.exec', { ...base, session_id: sid })
+      }
+    }
 
     // Rates are per 1M tokens, read from the gateway's model registry cache
     // (Hermes's own estimator cannot price providers like opencode-go).
@@ -495,7 +522,7 @@ export default {
           // usage payload, so an odd character must not reach the shell unquoted.
           const quotedPath = shellQuote(scriptPath)
           const quotedArgs = args.map(arg => ' ' + shellQuote(arg)).join('')
-          const resp = await host.request('shell.exec', { command: py + ' ' + quotedPath + quotedArgs })
+          const resp = await shellRequest(py + ' ' + quotedPath + quotedArgs)
           const stdout = resp && resp.stdout ? String(resp.stdout) : ''
           const code = resp && typeof resp.code === 'number' ? resp.code : 0
           lastCode = code
