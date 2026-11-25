@@ -67,6 +67,19 @@ if (-not $ScriptsDir) {
     }
 }
 
+# The gateway executes the baked-in path from each session's frozen working
+# directory, not from the scripts folder. A relative value therefore means a
+# different file (or no file) depending on the session, so accept only path
+# forms that are absolute on the gateway: POSIX-rooted, drive-rooted, or UNC.
+$scriptsIsAbsolute = $ScriptsDir.StartsWith('/') -or
+    $ScriptsDir.StartsWith('\') -or
+    ($ScriptsDir -match '^[A-Za-z]:[\\/]')
+if (-not $scriptsIsAbsolute) {
+    Write-Host "error: -ScriptsDir must be absolute on the gateway; got '$ScriptsDir'."
+    Write-Host '       use a POSIX path (/...), a drive path (C:\... or C:/...), or a UNC path (\\server\share\...)'
+    exit 1
+}
+
 # Plugin sources are read from this script's own repo clone, never from AppDir.
 $repoRoot = $PSScriptRoot
 

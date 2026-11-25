@@ -93,10 +93,12 @@ powershell -ExecutionPolicy Bypass -File .\deploy-windows.ps1 -ScriptsDir /opt/h
 It replaces `__HERMES_SCRIPTS__` with the **gateway's** scripts path. That path
 lives on the gateway, not on this machine, so the script will not invent one:
 pass `-ScriptsDir`, or set `HERMES_HOME` in the same shell (when that really is
-the gateway home) and it is derived from that. Without `-AppDir`, the script
-follows the app's ordinary Windows home rules above; if the app uses a custom
-home, pass that folder with `-AppDir` because `HERMES_HOME` means the gateway
-home here. A wrong value does not fail at
+the gateway home) and it is derived from that. The path must be absolute on the
+gateway (`/...`, `C:\...`, or `\\server\share\...`): the gateway runs it from
+each session's own working directory, so a relative path does not consistently
+name the scripts. Without `-AppDir`, the script follows the app's ordinary
+Windows home rules above; if the app uses a custom home, pass that folder with
+`-AppDir` because `HERMES_HOME` means the gateway home here. A wrong value does not fail at
 deploy time -- it surfaces later as a "no working python on the gateway shell"
 chip error -- so the run prints the path it baked in; confirm
 `<that path>/opencode_go_usage.py` exists on the gateway. Files already
