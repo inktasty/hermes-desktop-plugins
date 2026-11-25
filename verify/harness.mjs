@@ -564,6 +564,44 @@ async function testDeepseekRate() {
     console.log('    ' + mode + ' gateway poll: badge and RPC routing checked')
   }
 
+  console.log('--- deepseek-rate overlapping polls')
+  {
+    const { mod: raceMod } = await loadPlugin('deepseek-rate', { fresh: 'overlap-race' })
+    const pendingStats = []
+    const sid = 'sess-ds-overlap'
+    Date.now = () => OFF
+    sdk.host.state.focusedUsage.set(null)
+    sdk.host.state.focusedSessionId.set(sid)
+    sdk.host.state.model.set('opencode-go/omen-alpha')
+    // Let already-registered focus watchers answer against the previous immediate
+    // RPC fixture before this pending fixture installs, so they cannot share its queue.
+    await settle(12)
+    sdk.setRpc(async (method, params) => {
+      if (method === 'session.stats') return new Promise(resolve => pendingStats.push({ sid: params && params.session_id, resolve }))
+      return {}
+    })
+    const { ctx: raceCtx, contributions: raceContrib } = captureCtx()
+    stubTimers()
+    raceMod.register(raceCtx)
+    const racePoll = timers.find(t => t.ms === 10000).fn
+    restoreTimers()
+    await settle(12)
+    void racePoll()
+    await settle(12)
+    const raceReplies = pendingStats.filter(p => p.sid === sid)
+    check('overlapping deepseek poll test starts two stats requests', raceReplies.length >= 2, String(raceReplies.length))
+    const variant = () => {
+      const b = primOf(render(raceContrib[0].render), 'Badge')[0]
+      return b && b.props && b.props.variant
+    }
+    raceReplies[1].resolve({ model: 'deepseek-v4.1-flash' })
+    await settle(12)
+    check('overlapping deepseek poll renders the newer reply', variant() === 'success', String(variant()))
+    raceReplies[0].resolve({ model: 'opencode-go/omen-alpha' })
+    await settle(12)
+    check('stale deepseek reply cannot overwrite newer polled model', variant() === 'success', String(variant()))
+  }
+
   // hook-count oracle across state transitions
   const counts = []
   const spins = [
