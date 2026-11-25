@@ -564,6 +564,44 @@ async function testDeepseekRate() {
     console.log('    ' + mode + ' gateway poll: badge and RPC routing checked')
   }
 
+  console.log('--- deepseek-rate overlapping polls')
+  {
+    const { mod: raceMod } = await loadPlugin('deepseek-rate', { fresh: 'overlap-race' })
+    const pendingStats = []
+    const sid = 'sess-ds-overlap'
+    Date.now = () => OFF
+    sdk.host.state.focusedUsage.set(null)
+    sdk.host.state.focusedSessionId.set(sid)
+    sdk.host.state.model.set('opencode-go/omen-alpha')
+    // Let already-registered focus watchers answer against the previous immediate
+    // RPC fixture before this pending fixture installs, so they cannot share its queue.
+    await settle(12)
+    sdk.setRpc(async (method, params) => {
+      if (method === 'session.stats') return new Promise(resolve => pendingStats.push({ sid: params && params.session_id, resolve }))
+      return {}
+    })
+    const { ctx: raceCtx, contributions: raceContrib } = captureCtx()
+    stubTimers()
+    raceMod.register(raceCtx)
+    const racePoll = timers.find(t => t.ms === 10000).fn
+    restoreTimers()
+    await settle(12)
+    void racePoll()
+    await settle(12)
+    const raceReplies = pendingStats.filter(p => p.sid === sid)
+    check('overlapping deepseek poll test starts two stats requests', raceReplies.length >= 2, String(raceReplies.length))
+    const variant = () => {
+      const b = primOf(render(raceContrib[0].render), 'Badge')[0]
+      return b && b.props && b.props.variant
+    }
+    raceReplies[1].resolve({ model: 'deepseek-v4.1-flash' })
+    await settle(12)
+    check('overlapping deepseek poll renders the newer reply', variant() === 'success', String(variant()))
+    raceReplies[0].resolve({ model: 'opencode-go/omen-alpha' })
+    await settle(12)
+    check('stale deepseek reply cannot overwrite newer polled model', variant() === 'success', String(variant()))
+  }
+
   // hook-count oracle across state transitions
   const counts = []
   const spins = [
@@ -634,6 +672,7 @@ async function testSessionUsage() {
     const { mod: providerMod } = await loadPlugin('session-usage', { fresh: 'provider-pricing', scriptsDir: '/synthetic/scripts' })
     const commands = []
     let provider = 'synthetic-alpha'
+    let alphaInput = 2
     let offline = false
     sdk.host.state.focusedSessionId.set('synthetic-alpha-session')
     sdk.host.state.focusedUsage.set(null)
@@ -645,11 +684,13 @@ async function testSessionUsage() {
         const selected = params.command.includes("'synthetic-alpha'") ? 'synthetic-alpha'
           : params.command.includes("'synthetic-beta'") ? 'synthetic-beta' : 'synthetic-configured'
         return { code: 0, stdout: JSON.stringify({ ok: true, model: 'synthetic-model', provider: selected,
-          input: selected === 'synthetic-alpha' ? 2 : selected === 'synthetic-beta' ? 5 : 7, output: 1 }) }
+          input: selected === 'synthetic-alpha' ? alphaInput : selected === 'synthetic-beta' ? 5 : 7, output: 1 }) }
       }
       return {}
     })
     const { ctx, contributions } = captureCtx()
+    let providerNow = Date.UTC(2026, 8, 16, 20, 0)
+    Date.now = () => providerNow
     stubTimers()
     providerMod.register(ctx)
     const poll = timers.find(t => t.ms === 120000).fn
@@ -682,7 +723,17 @@ async function testSessionUsage() {
     check('provider pricing: another key failure preserves cached rate and clears unrelated error',
       commands.length === afterFailure && render(contributions[0].render).text.includes('$2.00') &&
       !render(contributions[0].render).text.includes('no working python'))
-    console.log('provider pricing regression: ' + (passes - before) + '/6 passed')
+    const beforeAgedRefresh = commands.length
+    alphaInput = 3
+    offline = false
+    providerNow += 6 * 3600000 + 1
+    await poll()
+    Date.now = realNow
+    const agedText = render(contributions[0].render).text
+    check('provider pricing: aged rate cache refreshes to the new card',
+      commands.length > beforeAgedRefresh && agedText.includes('in $3.00'),
+      'commands ' + beforeAgedRefresh + ' -> ' + commands.length + '; ' + agedText)
+    console.log('provider pricing regression: ' + (passes - before) + '/7 passed')
   }
 
   // Functional tests run against an installed copy so the SCRIPTS_DIR token is

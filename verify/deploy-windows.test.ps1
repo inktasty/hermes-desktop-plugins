@@ -12,8 +12,8 @@ function Assert($Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 
-function Deploy([string[]]$DeployArgs, [int]$ExpectedExit = 0) {
-    $output = & $engine -NoProfile -File $deploy @DeployArgs 2>&1
+function Deploy([string[]]$DeployArgs, [int]$ExpectedExit = 0, [string]$Script = $deploy) {
+    $output = & $engine -NoProfile -File $Script @DeployArgs 2>&1
     Assert ($LASTEXITCODE -eq $ExpectedExit) "Expected exit $ExpectedExit, got ${LASTEXITCODE}: $output"
     return ($output -join "`n")
 }
@@ -76,6 +76,25 @@ try {
     $null = Deploy @('-AppDir', $invalid, '-ScriptsDir', $scripts, '-Only', 'unknown-plugin') 1
     Assert (-not (Test-Path -LiteralPath $invalid)) 'Unknown -Only wrote files'
     Write-Host 'PASS: unknown -Only exits 1'
+
+    $mirror = Join-Path $root 'source-checkout'
+    $mirrorDeploy = Join-Path $mirror 'deploy-windows.ps1'
+    $mirrorPlugins = Join-Path $mirror 'desktop-plugins'
+    [IO.Directory]::CreateDirectory($mirror) | Out-Null
+    Copy-Item -LiteralPath $deploy -Destination $mirrorDeploy
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'desktop-plugins') -Destination $mirrorPlugins -Recurse
+    $sourceHashes = @{}
+    foreach ($id in $ids) {
+        $sourcePath = Join-Path (Join-Path $mirrorPlugins $id) 'plugin.js'
+        $sourceHashes[$id] = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourcePath).Hash
+    }
+    $output = Deploy @('-AppDir', $mirrorPlugins, '-ScriptsDir', $scripts) 1 $mirrorDeploy
+    Assert ($output -match 'rewrite the plugin source') 'Same-path deploy did not name the source overwrite'
+    foreach ($id in $ids) {
+        $sourcePath = Join-Path (Join-Path $mirrorPlugins $id) 'plugin.js'
+        Assert ((Get-FileHash -Algorithm SHA256 -LiteralPath $sourcePath).Hash -eq $sourceHashes[$id]) "Same-path deploy rewrote $id"
+    }
+    Write-Host 'PASS: AppDir equal to the source checkout is refused without rewriting it'
 
     $missing = Join-Path $root 'missing'
     $null = Deploy @('-AppDir', $missing) 1
