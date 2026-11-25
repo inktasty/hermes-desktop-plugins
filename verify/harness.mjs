@@ -672,6 +672,7 @@ async function testSessionUsage() {
     const { mod: providerMod } = await loadPlugin('session-usage', { fresh: 'provider-pricing', scriptsDir: '/synthetic/scripts' })
     const commands = []
     let provider = 'synthetic-alpha'
+    let alphaInput = 2
     let offline = false
     sdk.host.state.focusedSessionId.set('synthetic-alpha-session')
     sdk.host.state.focusedUsage.set(null)
@@ -683,11 +684,13 @@ async function testSessionUsage() {
         const selected = params.command.includes("'synthetic-alpha'") ? 'synthetic-alpha'
           : params.command.includes("'synthetic-beta'") ? 'synthetic-beta' : 'synthetic-configured'
         return { code: 0, stdout: JSON.stringify({ ok: true, model: 'synthetic-model', provider: selected,
-          input: selected === 'synthetic-alpha' ? 2 : selected === 'synthetic-beta' ? 5 : 7, output: 1 }) }
+          input: selected === 'synthetic-alpha' ? alphaInput : selected === 'synthetic-beta' ? 5 : 7, output: 1 }) }
       }
       return {}
     })
     const { ctx, contributions } = captureCtx()
+    let providerNow = Date.UTC(2026, 8, 16, 20, 0)
+    Date.now = () => providerNow
     stubTimers()
     providerMod.register(ctx)
     const poll = timers.find(t => t.ms === 120000).fn
@@ -720,7 +723,17 @@ async function testSessionUsage() {
     check('provider pricing: another key failure preserves cached rate and clears unrelated error',
       commands.length === afterFailure && render(contributions[0].render).text.includes('$2.00') &&
       !render(contributions[0].render).text.includes('no working python'))
-    console.log('provider pricing regression: ' + (passes - before) + '/6 passed')
+    const beforeAgedRefresh = commands.length
+    alphaInput = 3
+    offline = false
+    providerNow += 6 * 3600000 + 1
+    await poll()
+    Date.now = realNow
+    const agedText = render(contributions[0].render).text
+    check('provider pricing: aged rate cache refreshes to the new card',
+      commands.length > beforeAgedRefresh && agedText.includes('in $3.00'),
+      'commands ' + beforeAgedRefresh + ' -> ' + commands.length + '; ' + agedText)
+    console.log('provider pricing regression: ' + (passes - before) + '/7 passed')
   }
 
   // Functional tests run against an installed copy so the SCRIPTS_DIR token is

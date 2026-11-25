@@ -55,6 +55,10 @@ gateway.
 | Linux / macOS | `~/.hermes/desktop-plugins/<id>/plugin.js` |
 | Windows | `%LOCALAPPDATA%\hermes\desktop-plugins\<id>\plugin.js` |
 
+On Windows, the app falls back to `<home>\AppData\Local\hermes` when
+`LOCALAPPDATA` is absent, and an upgraded install keeps using `<home>\.hermes`
+while that legacy home exists and the new default home does not.
+
 With a remote gateway (Windows app, Linux gateway) that means the Windows side.
 The folder name must match the plugin's `id`.
 
@@ -92,7 +96,9 @@ pass `-ScriptsDir`, or set `HERMES_HOME` in the same shell (when that really is
 the gateway home) and it is derived from that. The path must be absolute on the
 gateway (`/...`, `C:\...`, or `\\server\share\...`): the gateway runs it from
 each session's own working directory, so a relative path does not consistently
-name the scripts. A wrong value does not fail at
+name the scripts. Without `-AppDir`, the script follows the app's ordinary
+Windows home rules above; if the app uses a custom home, pass that folder with
+`-AppDir` because `HERMES_HOME` means the gateway home here. A wrong value does not fail at
 deploy time -- it surfaces later as a "no working python on the gateway shell"
 chip error -- so the run prints the path it baked in; confirm
 `<that path>/opencode_go_usage.py` exists on the gateway. Files already
