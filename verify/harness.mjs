@@ -564,6 +564,44 @@ async function testDeepseekRate() {
     console.log('    ' + mode + ' gateway poll: badge and RPC routing checked')
   }
 
+  console.log('--- deepseek-rate overlapping polls')
+  {
+    const { mod: raceMod } = await loadPlugin('deepseek-rate', { fresh: 'overlap-race' })
+    const pendingStats = []
+    const sid = 'sess-ds-overlap'
+    Date.now = () => OFF
+    sdk.host.state.focusedUsage.set(null)
+    sdk.host.state.focusedSessionId.set(sid)
+    sdk.host.state.model.set('opencode-go/omen-alpha')
+    // Let already-registered focus watchers answer against the previous immediate
+    // RPC fixture before this pending fixture installs, so they cannot share its queue.
+    await settle(12)
+    sdk.setRpc(async (method, params) => {
+      if (method === 'session.stats') return new Promise(resolve => pendingStats.push({ sid: params && params.session_id, resolve }))
+      return {}
+    })
+    const { ctx: raceCtx, contributions: raceContrib } = captureCtx()
+    stubTimers()
+    raceMod.register(raceCtx)
+    const racePoll = timers.find(t => t.ms === 10000).fn
+    restoreTimers()
+    await settle(12)
+    void racePoll()
+    await settle(12)
+    const raceReplies = pendingStats.filter(p => p.sid === sid)
+    check('overlapping deepseek poll test starts two stats requests', raceReplies.length >= 2, String(raceReplies.length))
+    const variant = () => {
+      const b = primOf(render(raceContrib[0].render), 'Badge')[0]
+      return b && b.props && b.props.variant
+    }
+    raceReplies[1].resolve({ model: 'deepseek-v4.1-flash' })
+    await settle(12)
+    check('overlapping deepseek poll renders the newer reply', variant() === 'success', String(variant()))
+    raceReplies[0].resolve({ model: 'opencode-go/omen-alpha' })
+    await settle(12)
+    check('stale deepseek reply cannot overwrite newer polled model', variant() === 'success', String(variant()))
+  }
+
   // hook-count oracle across state transitions
   const counts = []
   const spins = [
@@ -634,6 +672,7 @@ async function testSessionUsage() {
     const { mod: providerMod } = await loadPlugin('session-usage', { fresh: 'provider-pricing', scriptsDir: '/synthetic/scripts' })
     const commands = []
     let provider = 'synthetic-alpha'
+    let alphaInput = 2
     let offline = false
     sdk.host.state.focusedSessionId.set('synthetic-alpha-session')
     sdk.host.state.focusedUsage.set(null)
@@ -645,11 +684,13 @@ async function testSessionUsage() {
         const selected = params.command.includes("'synthetic-alpha'") ? 'synthetic-alpha'
           : params.command.includes("'synthetic-beta'") ? 'synthetic-beta' : 'synthetic-configured'
         return { code: 0, stdout: JSON.stringify({ ok: true, model: 'synthetic-model', provider: selected,
-          input: selected === 'synthetic-alpha' ? 2 : selected === 'synthetic-beta' ? 5 : 7, output: 1 }) }
+          input: selected === 'synthetic-alpha' ? alphaInput : selected === 'synthetic-beta' ? 5 : 7, output: 1 }) }
       }
       return {}
     })
     const { ctx, contributions } = captureCtx()
+    let providerNow = Date.UTC(2026, 8, 16, 20, 0)
+    Date.now = () => providerNow
     stubTimers()
     providerMod.register(ctx)
     const poll = timers.find(t => t.ms === 120000).fn
@@ -682,7 +723,17 @@ async function testSessionUsage() {
     check('provider pricing: another key failure preserves cached rate and clears unrelated error',
       commands.length === afterFailure && render(contributions[0].render).text.includes('$2.00') &&
       !render(contributions[0].render).text.includes('no working python'))
-    console.log('provider pricing regression: ' + (passes - before) + '/6 passed')
+    const beforeAgedRefresh = commands.length
+    alphaInput = 3
+    offline = false
+    providerNow += 6 * 3600000 + 1
+    await poll()
+    Date.now = realNow
+    const agedText = render(contributions[0].render).text
+    check('provider pricing: aged rate cache refreshes to the new card',
+      commands.length > beforeAgedRefresh && agedText.includes('in $3.00'),
+      'commands ' + beforeAgedRefresh + ' -> ' + commands.length + '; ' + agedText)
+    console.log('provider pricing regression: ' + (passes - before) + '/7 passed')
   }
 
   {
@@ -936,6 +987,52 @@ async function testSessionUsage() {
     check('stats fallback ' + mode + ': renders without live event', !pollOut.err && (mode === 'legacy' ? /API calls 12/.test(pollOut.text) : /No turns yet/.test(pollOut.text)), pollOut.text)
     if (mode === 'legacy') check('stats fallback legacy: working method cached', methods.filter(m => m === 'session.stats').length === 1 && methods.filter(m => m === 'session.usage').length === 2, JSON.stringify(methods))
     console.log('    stats fallback ' + mode + ': checked')
+  }
+
+  console.log('--- session-usage overlapping polls')
+  {
+    const { mod: raceMod } = await loadPlugin('session-usage', { fresh: 'usage-race', scriptsDir: '/tmp/hdp-test/scripts' })
+    const pendingUsage = []
+    sdk.host.state.focusedSessionId.set('sess-usage-race')
+    sdk.host.state.focusedUsage.set(null)
+    // Let the already-armed deepseek-rate focus watcher answer and settle BEFORE
+    // the pending-RPC fixture installs, so its request cannot share the queue.
+    await settle(12)
+    sdk.setRpc(async (method, params) => {
+      if (method === 'session.stats') throw Object.assign(new Error('unknown method'), { code: -32601 })
+      if (method === 'session.usage') return new Promise(resolve => pendingUsage.push({ sid: params && params.session_id, resolve }))
+      if (method === 'shell.exec') return { stdout: priceLine + '\n', stderr: '', code: 0 }
+      return {}
+    })
+    const { ctx: raceCtx, contributions: raceContrib } = captureCtx()
+    stubTimers()
+    raceMod.register(raceCtx)
+    const racePoll = timers.find(t => t.ms === 120000).fn
+    restoreTimers()
+    await settle(12)
+    void racePoll()
+    await settle(12)
+    const raceReplies = () => pendingUsage.filter(p => p.sid === 'sess-usage-race')
+    check('overlapping session poll test starts two usage requests', raceReplies().length >= 2, JSON.stringify(pendingUsage.map(p => p.sid)))
+    const newer = {
+      ...USAGE,
+      model: 'synthetic-new-model', input: 190000, prompt: 190000, output: 10000, total: 200000,
+      cache_hit_pct: 80, dev_credits_spent_micros: 5000000
+    }
+    const older = {
+      ...USAGE,
+      model: 'synthetic-old-model', input: 90000, prompt: 90000, output: 4000, total: 94000,
+      cache_hit_pct: 20, dev_credits_spent_micros: 1000000
+    }
+    raceReplies()[1].resolve(newer)
+    await settle(12)
+    check('overlapping session poll renders the newer reply', render(raceContrib[0].render).text.includes('$5.00'), render(raceContrib[0].render).text)
+    raceReplies()[0].resolve(older)
+    await settle(12)
+    const raceOut = render(raceContrib[0].render)
+    check('stale session reply cannot overwrite newer polled state',
+      raceOut.text.includes('$5.00') && raceOut.text.includes('synthetic-new-model') && !raceOut.text.includes('synthetic-old-model'),
+      raceOut.text)
   }
 
   // Baseline case with default Linux-style python3 success

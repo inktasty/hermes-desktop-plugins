@@ -136,13 +136,18 @@ async function teardown(name, disposers, baseline, container) {
   container.remove()
 }
 
-async function testDeepseekRate({ container, state, failRpc }) {
+async function testDeepseekRate({ container, state, calls, failRpc }) {
   const badge = () => container.querySelector('[data-prim="Badge"]')
   const neutral = badge().dataset.variant
   await settle(() => state.model.set('deepseek/deepseek-v4-pro'))
   check('deepseek-rate atom subscription repaints badge', badge().dataset.variant !== neutral)
   await settle(() => state.model.set(''))
   check('deepseek-rate empty model restores neutral', badge().dataset.variant === neutral)
+  await settle(() => state.activeSessionId.set('synthetic-active'))
+  check('deepseek-rate active-session change polls immediately', calls.some(c => (
+    c.method === 'session.usage' && c.params.session_id === 'synthetic-active'
+  )))
+  await settle(() => state.activeSessionId.set(null))
   failRpc()
   await settle(() => state.focusedSessionId.set('synthetic-failure'))
   check('deepseek-rate failed poll stays neutral', badge().dataset.variant === neutral)
@@ -150,6 +155,12 @@ async function testDeepseekRate({ container, state, failRpc }) {
 
 async function testSessionUsage({ container, state, calls, failRpc, setSessionPayload }) {
   check('session-usage empty chip', container.querySelector('button').textContent === 'usage')
+  await settle(() => state.activeSessionId.set('synthetic-active'))
+  check('session-usage active-session change fetches without focus', calls.some(c => (
+    c.method === 'session.usage' && c.params.session_id === 'synthetic-active'
+  )))
+  check('session-usage active-session fetch repaints chip', container.querySelector('button').textContent === '$2.50')
+  await settle(() => state.activeSessionId.set(null))
   await settle(() => state.focusedSessionId.set('synthetic-session'))
   check('session-usage focus effect fetches new session', calls.some(c => (
     c.method === 'session.usage' && c.params.session_id === 'synthetic-session'
