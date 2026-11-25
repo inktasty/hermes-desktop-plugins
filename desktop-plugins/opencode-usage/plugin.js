@@ -124,6 +124,26 @@ const $modelsError = atom(null) // last models failure text | null
 const $modelsAt = atom(null)    // ms epoch of the last GOOD models fetch
 const $modelsLoading = atom(false)
 
+// Canonical gateways scope `shell.exec` to one live local session; legacy
+// gateways reject that extra parameter instead. The refresh path probes the
+// sessionless legacy form once, then remembers which wire the backend speaks.
+const NULL_ATOM = atom(null)
+const STATE = (host && host.state) || {}
+const FOCUS_ATOM = STATE.focusedSessionId || NULL_ATOM
+const ACTIVE_ATOM = STATE.activeSessionId || NULL_ATOM
+
+function currentSessionId() {
+  try {
+    return FOCUS_ATOM.get() || ACTIVE_ATOM.get() || null
+  } catch (e) {
+    return null
+  }
+}
+
+function isInvalidParams(e) {
+  return Boolean(e) && (e.code === 4001 || (e.data && e.data.reason === 'invalid_params') || /invalid_params/i.test(String(e.message || e)))
+}
+
 // ---- settings ---------------------------------------------------------------
 // Persisted through ctx.storage, so a choice survives a reload. Every field has a
 // default and a stored blob is sanitised field by field, so a value written by an
@@ -1624,6 +1644,27 @@ export default {
   name: 'OpenCode Go Usage',
   register(ctx) {
     pluginCtx = ctx
+    let shellNeedsSession = null
+
+    async function shellRequest(command) {
+      const base = { command }
+      const sid = currentSessionId()
+      if (shellNeedsSession === true) {
+        if (!sid) throw new Error('this gateway requires an active local session before shell.exec can run gateway scripts')
+        return host.request('shell.exec', { ...base, session_id: sid })
+      }
+      try {
+        const resp = await host.request('shell.exec', base)
+        if (shellNeedsSession == null) shellNeedsSession = false
+        return resp
+      } catch (e) {
+        if (!isInvalidParams(e)) throw e
+        shellNeedsSession = true
+        if (!sid) throw new Error('this gateway requires an active local session before shell.exec can run gateway scripts')
+        return host.request('shell.exec', { ...base, session_id: sid })
+      }
+    }
+
     // One interpreter probe, shared by every call: try each candidate until one
     // exits 0, then hand back its stdout. Try the cached winner first when known.
     // `args` are internal literals ('--part', '0'), never user text.
@@ -1654,7 +1695,7 @@ export default {
           // shellQuote picks the form the GATEWAY's shell needs, which is not
           // necessarily this platform's.
           const quotedPath = shellQuote(scriptPath)
-          const resp = await host.request('shell.exec', { command: py + ' ' + quotedPath + suffix })
+          const resp = await shellRequest(py + ' ' + quotedPath + suffix)
           const stdout = resp && resp.stdout ? String(resp.stdout) : ''
           if (stdout) sawOutput = true
           const code = resp && typeof resp.code === 'number' ? resp.code : 0

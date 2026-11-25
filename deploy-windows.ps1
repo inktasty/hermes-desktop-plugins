@@ -18,16 +18,38 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# The app's plugin folder. Derived rather than defaulted: with LOCALAPPDATA unset the
-# old default quietly became "\hermes\desktop-plugins", i.e. a path at the root.
+# The app's plugin folder. Match the Windows app's own ordinary-home resolution:
+# LOCALAPPDATA missing or whitespace falls back to <home>\AppData\Local, and an
+# upgraded install whose legacy <home>\.hermes exists keeps using it while the
+# new default home does not. Creating the new default here would itself flip the
+# app away from that legacy home. A custom HERMES_HOME is deliberately not used
+# here: in this script it names the gateway home, so a custom app home needs an
+# explicit -AppDir.
 if (-not $AppDir) {
-    if ($env:LOCALAPPDATA) {
-        $AppDir = Join-Path $env:LOCALAPPDATA 'hermes\desktop-plugins'
-    } else {
-        Write-Host 'error: no -AppDir given, and LOCALAPPDATA is not set in this shell.'
-        Write-Host '       pass the app plugin folder, e.g. -AppDir C:\Users\you\AppData\Local\hermes\desktop-plugins'
-        exit 1
+    $userHome = $env:USERPROFILE
+    if (-not $userHome) { $userHome = $HOME }
+    if ($userHome) { $userHome = $userHome.Trim() }
+
+    $localAppData = $env:LOCALAPPDATA
+    if ($localAppData) { $localAppData = $localAppData.Trim() }
+    if (-not $localAppData) {
+        if (-not $userHome) {
+            Write-Host 'error: no -AppDir given, and neither LOCALAPPDATA nor a user home is available in this shell.'
+            Write-Host '       pass the app plugin folder, e.g. -AppDir C:\Users\you\AppData\Local\hermes\desktop-plugins'
+            exit 1
+        }
+        $localAppData = Join-Path (Join-Path $userHome 'AppData') 'Local'
     }
+
+    $defaultHome = Join-Path $localAppData 'hermes'
+    $legacyHome = if ($userHome) { Join-Path $userHome '.hermes' } else { $null }
+    $appHome = $defaultHome
+    if ($legacyHome -and
+        -not [System.IO.Directory]::Exists($defaultHome) -and
+        [System.IO.Directory]::Exists($legacyHome)) {
+        $appHome = $legacyHome
+    }
+    $AppDir = Join-Path $appHome 'desktop-plugins'
 }
 
 # -ScriptsDir is the GATEWAY's scripts folder, so it cannot be guessed from here: a
@@ -43,6 +65,19 @@ if (-not $ScriptsDir) {
         Write-Host '       pass the GATEWAY scripts dir, e.g. -ScriptsDir /opt/hermes/scripts'
         exit 1
     }
+}
+
+# The gateway executes the baked-in path from each session's frozen working
+# directory, not from the scripts folder. A relative value therefore means a
+# different file (or no file) depending on the session, so accept only path
+# forms that are absolute on the gateway: POSIX-rooted, drive-rooted, or UNC.
+$scriptsIsAbsolute = $ScriptsDir.StartsWith('/') -or
+    $ScriptsDir.StartsWith('\') -or
+    ($ScriptsDir -match '^[A-Za-z]:[\\/]')
+if (-not $scriptsIsAbsolute) {
+    Write-Host "error: -ScriptsDir must be absolute on the gateway; got '$ScriptsDir'."
+    Write-Host '       use a POSIX path (/...), a drive path (C:\... or C:/...), or a UNC path (\\server\share\...)'
+    exit 1
 }
 
 # Plugin sources are read from this script's own repo clone, never from AppDir.
@@ -66,6 +101,21 @@ if ($Only) {
         exit 1
     }
     $pluginIds = @($Only)
+}
+
+# The destination belongs to the app, never to this checkout. If they are the
+# same directory, token substitution would rewrite the source plugin itself and
+# destroy the placeholder every later deploy depends on. Compare full file
+# paths case-insensitively because this script targets Windows.
+foreach ($id in $pluginIds) {
+    $src = Join-Path $repoRoot "desktop-plugins\$id\plugin.js"
+    $dest = Join-Path (Join-Path $AppDir $id) 'plugin.js'
+    if ([System.IO.File]::Exists($src) -and
+        [System.IO.Path]::GetFullPath($src).Equals([System.IO.Path]::GetFullPath($dest), [System.StringComparison]::OrdinalIgnoreCase)) {
+        Write-Host "error: -AppDir resolves to this clone's desktop-plugins folder; deploying would rewrite the plugin source $src"
+        Write-Host '       pass the app plugin folder, e.g. -AppDir C:\Users\you\AppData\Local\hermes\desktop-plugins'
+        exit 1
+    }
 }
 
 # UTF-8 without a BOM: the app reads the file as plain JS.
