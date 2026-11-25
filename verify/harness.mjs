@@ -685,6 +685,41 @@ async function testSessionUsage() {
     console.log('provider pricing regression: ' + (passes - before) + '/6 passed')
   }
 
+  {
+    const before = passes
+    const { mod: canonicalShellMod } = await loadPlugin('session-usage', { fresh: 'canonical-shell', scriptsDir: '/synthetic/scripts' })
+    const shellCalls = []
+    sdk.host.state.focusedSessionId.set('sess-price-canonical')
+    sdk.host.state.focusedUsage.set(null)
+    sdk.setRpc(async (method, params) => {
+      if (method === 'session.stats') throw new Error('synthetic unknown method: session.stats')
+      if (method === 'session.usage') return USAGE
+      if (method === 'shell.exec') {
+        shellCalls.push({ ...params })
+        if (!params.session_id) {
+          const invalid = new Error('invalid_params')
+          invalid.code = 4001
+          invalid.data = { reason: 'invalid_params' }
+          throw invalid
+        }
+        return { code: 0, stdout: priceLine + '\n' }
+      }
+      return {}
+    })
+    const { ctx: canonicalCtx, contributions: canonicalContributions } = captureCtx()
+    stubTimers()
+    canonicalShellMod.register(canonicalCtx)
+    restoreTimers()
+    await settle(16)
+    const canonicalOut = render(canonicalContributions[0].render)
+    check('canonical shell pricing: a sessionless refusal is retried with the focused session',
+      shellCalls.some(c => c.session_id == null) && shellCalls.some(c => c.session_id === 'sess-price-canonical'),
+      JSON.stringify(shellCalls))
+    check('canonical shell pricing: the retried estimate reaches the chip', /Session cost \(est\.\) \$\d/.test(canonicalOut.text), canonicalOut.text)
+    sdk.host.state.focusedSessionId.set(null)
+    console.log('canonical shell pricing regression: ' + (passes - before) + '/2 passed')
+  }
+
   // Functional tests run against an installed copy so the SCRIPTS_DIR token is
   // resolved the same way install.sh resolves it.
   const { mod, ns: suNs } = await loadPlugin('session-usage', { fresh: 1, scriptsDir: '/tmp/hdp-test/scripts' })
@@ -2070,6 +2105,47 @@ async function testOpencodeUsage() {
     const winPaths = ['opencode_go_models.py', 'opencode_go_usage.py'].map(name => 'python3 "' + scriptsDir + '/' + name + '"')
     check('command composition: a Windows gateway gets a double-quoted script path, no single quote anywhere',
       composed.length > 0 && composed.every(c => winPaths.includes(c) && c.indexOf("'") === -1), JSON.stringify(composed))
+  }
+
+  {
+    const before = passes
+    const { mod: canonicalShellMod } = await loadPlugin('opencode-usage', { fresh: 'canonical-shell', scriptsDir: '/tmp/hdp-test/scripts' })
+    const shellCalls = []
+    sdk.host.state.focusedSessionId.set('sess-opencode-canonical')
+    sdk.setRpc(async (method, params) => {
+      if (method === 'shell.exec') {
+        shellCalls.push({ ...params })
+        if (!params.session_id) {
+          const invalid = new Error('invalid_params')
+          invalid.code = 4001
+          invalid.data = { reason: 'invalid_params' }
+          throw invalid
+        }
+        const cmd = String(params.command || '')
+        if (cmd.includes('opencode_go_models.py')) return { stdout: packPayload(modelsPayload), stderr: '', code: 0 }
+        if (cmd.includes('opencode_go_usage.py')) return { stdout: JSON.stringify(snap), stderr: '', code: 0 }
+      }
+      return {}
+    })
+    const { ctx: canonicalCtx, contributions: canonicalContributions } = captureCtx()
+    stubTimers()
+    canonicalShellMod.register(canonicalCtx)
+    restoreTimers()
+    await settle(16)
+    const canonicalChip = canonicalContributions.find(c => c.id === 'chip')
+    check('canonical shell refresh: a sessionless refusal is retried with the focused session',
+      shellCalls.some(c => c.session_id == null) && shellCalls.some(c => c.session_id === 'sess-opencode-canonical'),
+      JSON.stringify(shellCalls))
+    check('canonical shell refresh: the retried usage reaches the chip', render(canonicalChip.render).text.includes(wantPct), render(canonicalChip.render).text)
+    const probes = shellCalls.filter(c => c.session_id == null).length
+    const canonicalRefresh = canonicalContributions.find(c => c.area === 'palette' && c.data.id === 'opencodeGo.refresh')
+    await canonicalRefresh.data.run()
+    await settle(20)
+    check('canonical shell refresh: later polls reuse session routing without another probe',
+      shellCalls.filter(c => c.session_id == null).length === probes,
+      JSON.stringify(shellCalls))
+    sdk.host.state.focusedSessionId.set(null)
+    console.log('canonical shell refresh regression: ' + (passes - before) + '/3 passed')
   }
 
   Date.now = realNow
