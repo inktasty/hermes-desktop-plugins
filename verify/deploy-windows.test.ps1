@@ -4,6 +4,8 @@ $deploy = Join-Path $repoRoot 'deploy-windows.ps1'
 $engine = (Get-Process -Id $PID).Path
 $root = Join-Path ([IO.Path]::GetTempPath()) ('hermes-deploy-test-' + [guid]::NewGuid())
 $savedHome = $env:HERMES_HOME
+$savedLocalAppData = $env:LOCALAPPDATA
+$savedUserProfile = $env:USERPROFILE
 $ids = @('deepseek-rate', 'opencode-usage', 'session-usage')
 
 function Assert($Condition, [string]$Message) {
@@ -99,6 +101,45 @@ try {
     Assert (-not (Test-Path -LiteralPath $missing)) 'Missing scripts path wrote files'
     Write-Host 'PASS: missing -ScriptsDir with HERMES_HOME unset exits 1'
 
+    foreach ($localValue in @($null, '   ')) {
+        $case = if ($null -eq $localValue) { 'unset' } else { 'blank' }
+        $user = Join-Path $root ('user-' + $case)
+        [IO.Directory]::CreateDirectory($user) | Out-Null
+        $env:USERPROFILE = $user
+        $env:LOCALAPPDATA = $localValue
+        $expectedApp = Join-Path (Join-Path (Join-Path (Join-Path $user 'AppData') 'Local') 'hermes') 'desktop-plugins'
+        $null = Deploy @('-ScriptsDir', $scripts)
+        Check-Files $expectedApp $ids $literal
+    }
+    Write-Host 'PASS: missing or blank LOCALAPPDATA falls back to <home>\AppData\Local\hermes'
+
+    $legacyUser = Join-Path $root 'user-legacy'
+    $legacyHome = Join-Path $legacyUser '.hermes'
+    $freshLocalAppData = Join-Path $root 'fresh-localappdata'
+    [IO.Directory]::CreateDirectory($legacyHome) | Out-Null
+    $env:USERPROFILE = $legacyUser
+    $env:LOCALAPPDATA = $freshLocalAppData
+    $null = Deploy @('-ScriptsDir', $scripts)
+    Check-Files (Join-Path $legacyHome 'desktop-plugins') $ids $literal
+    Assert (-not (Test-Path -LiteralPath (Join-Path $freshLocalAppData 'hermes'))) 'Legacy-home deploy created the new default home'
+    Write-Host 'PASS: legacy Windows home wins while the new default home does not exist'
+
+    $bothUser = Join-Path $root 'user-both'
+    $bothLegacyHome = Join-Path $bothUser '.hermes'
+    $bothLocalAppData = Join-Path $root 'existing-localappdata'
+    $bothDefaultHome = Join-Path $bothLocalAppData 'hermes'
+    [IO.Directory]::CreateDirectory($bothLegacyHome) | Out-Null
+    [IO.Directory]::CreateDirectory($bothDefaultHome) | Out-Null
+    $env:USERPROFILE = $bothUser
+    $env:LOCALAPPDATA = $bothLocalAppData
+    $null = Deploy @('-ScriptsDir', $scripts)
+    Check-Files (Join-Path $bothDefaultHome 'desktop-plugins') $ids $literal
+    Assert (-not (Test-Path -LiteralPath (Join-Path $bothLegacyHome 'desktop-plugins'))) 'Default-home deploy wrote to the legacy home too'
+    Write-Host 'PASS: new default home wins once it exists'
+
+    $env:LOCALAPPDATA = $savedLocalAppData
+    $env:USERPROFILE = $savedUserProfile
+
     $env:HERMES_HOME = Join-Path $root 'gateway'
     $fallback = Join-Path $root 'fallback'
     $null = Deploy @('-AppDir', $fallback)
@@ -121,5 +162,7 @@ try {
     Write-Host "PASS: deployment checks complete (PowerShell $($PSVersionTable.PSVersion))"
 } finally {
     $env:HERMES_HOME = $savedHome
+    $env:LOCALAPPDATA = $savedLocalAppData
+    $env:USERPROFILE = $savedUserProfile
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 }
