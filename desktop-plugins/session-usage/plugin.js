@@ -611,7 +611,12 @@ export default {
       const loadedRates = useValue(ratesData)
       const costs = useValue(costData)
       const focusValue = useValue(FOCUS_ATOM)
-      const sid = focusValue || ACTIVE_ATOM.get()
+      // The active id is the fallback session, so it is just as reactive as the
+      // focused id. Reading it with `.get()` here leaves an active-only change
+      // invisible to React: no render, no focus effect, and no poll for up to
+      // two minutes while the old session's cost stays on the chip.
+      const activeValue = useValue(ACTIVE_ATOM)
+      const sid = focusValue || activeValue
 
       const sess = sessMap[sid] || null
       const updated = timesMap[sid] || null
