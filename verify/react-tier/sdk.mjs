@@ -1,4 +1,4 @@
-import { createElement, createContext, useContext, useSyncExternalStore } from 'react'
+import { cloneElement, createElement, createContext, useContext, useSyncExternalStore } from 'react'
 
 export const atoms = new Set()
 export function atom(initial) {
@@ -61,15 +61,24 @@ export const Tip = prim('Tip')
 export const SearchField = prim('SearchField')
 export const SegmentedControl = prim('SegmentedControl')
 export const Switch = prim('Switch')
-const Open = createContext(false)
-export const Popover = ({ open, children }) => createElement(
-  Open.Provider,
-  { value: open },
+const PopoverState = createContext(null)
+export const Popover = ({ open, onOpenChange, children }) => createElement(
+  PopoverState.Provider,
+  { value: { open, onOpenChange } },
   createElement('div', { 'data-open': String(open) }, children)
 )
-export const PopoverTrigger = ({ children }) => children
-export const PopoverContent = ({ children }) => useContext(Open)
-  ? createElement('div', { 'data-prim': 'PopoverContent' }, children)
+export const PopoverTrigger = ({ children }) => {
+  const { open, onOpenChange } = useContext(PopoverState)
+  return cloneElement(children, {
+    'aria-expanded': open,
+    onClick: event => {
+      children.props.onClick?.(event)
+      if (!event.defaultPrevented) onOpenChange?.(!open)
+    }
+  })
+}
+export const PopoverContent = ({ children, style }) => useContext(PopoverState).open
+  ? createElement('div', { 'data-prim': 'PopoverContent', style }, children)
   : null
 export const cn = (...parts) => parts.filter(Boolean).join(' ')
 export const haptic = () => {}

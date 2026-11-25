@@ -1,4 +1,4 @@
-# Deploy the three desktop plugins into the app's plugin folder on THIS machine.
+# Deploy the desktop plugins into the app's plugin folder on THIS machine.
 #
 #   ...\deploy-windows.ps1 -ScriptsDir /opt/hermes/scripts   # the GATEWAY's folder
 #   (or set HERMES_HOME in this shell and omit -ScriptsDir; it cannot be guessed,
@@ -77,7 +77,7 @@ if (-not $repoRoot) {
     Write-Host 'error: $PSScriptRoot is empty; run this with -File, not dot-sourced or via iex.'
     exit 1
 }
-$pluginIds = @('deepseek-rate', 'opencode-usage', 'session-usage')
+$pluginIds = @('deepseek-rate', 'opencode-usage', 'session-usage', 'context-runway')
 
 # The shipped placeholder; every occurrence is replaced with the scripts path.
 $scriptsToken = '__HERMES_SCRIPTS__'

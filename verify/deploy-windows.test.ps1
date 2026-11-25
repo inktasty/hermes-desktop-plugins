@@ -6,7 +6,7 @@ $root = Join-Path ([IO.Path]::GetTempPath()) ('hermes-deploy-test-' + [guid]::Ne
 $savedHome = $env:HERMES_HOME
 $savedLocalAppData = $env:LOCALAPPDATA
 $savedUserProfile = $env:USERPROFILE
-$ids = @('deepseek-rate', 'opencode-usage', 'session-usage')
+$ids = @('deepseek-rate', 'opencode-usage', 'session-usage', 'context-runway')
 
 function Assert($Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
@@ -43,18 +43,18 @@ try {
     $literal = 'C:\\gateway\''s\\scripts'
     $null = Deploy @('-AppDir', $app, '-ScriptsDir', $scripts)
     Check-Files $app $ids $literal
-    Write-Host 'PASS: full deploy; JS escaping, no tokens, UTF-8 without BOM, LF only (3 plugins)'
+    Write-Host "PASS: full deploy; JS escaping, no tokens, UTF-8 without BOM, LF only ($($ids.Count) plugins)"
 
     $output = Deploy @('-AppDir', $app, '-ScriptsDir', $scripts)
     $unchanged = @($output -split "`n" | Where-Object { $_ -like 'unchanged *' })
-    Assert ($unchanged.Count -eq 3 -and $output -notmatch '(?m)^wrote ') 'Second deploy did not report all plugins unchanged'
-    Write-Host 'PASS: second deploy reports unchanged (3 plugins)'
+    Assert ($unchanged.Count -eq $ids.Count -and $output -notmatch '(?m)^wrote ') 'Second deploy did not report all plugins unchanged'
+    Write-Host "PASS: second deploy reports unchanged ($($ids.Count) plugins)"
 
     $bracketApp = Join-Path $root 'plugins[42]'
     $output = Deploy @('-AppDir', $bracketApp, '-ScriptsDir', $scripts)
     Check-Files $bracketApp $ids $literal
     $hashes = [regex]::Matches($output, '(?m)^  sha256 ([0-9A-Fa-f]{64})\r?$')
-    Assert ($hashes.Count -eq $ids.Count) 'Bracket AppDir did not print three 64-hex SHA256 hashes'
+    Assert ($hashes.Count -eq $ids.Count) 'Bracket AppDir did not print one 64-hex SHA256 hash per plugin'
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
         for ($i = 0; $i -lt $ids.Count; $i++) {
@@ -65,7 +65,7 @@ try {
     } finally {
         $sha.Dispose()
     }
-    Write-Host "PASS: bracket AppDir prints three matching literal-file SHA256 hashes (PowerShell $($PSVersionTable.PSVersion))"
+    Write-Host "PASS: bracket AppDir prints $($ids.Count) matching literal-file SHA256 hashes (PowerShell $($PSVersionTable.PSVersion))"
 
     $only = Join-Path $root 'only'
     $null = Deploy @('-AppDir', $only, '-ScriptsDir', $scripts, '-Only', 'session-usage')
