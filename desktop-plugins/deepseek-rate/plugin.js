@@ -263,6 +263,21 @@ export default {
     const pollTimer = setInterval(pollFocusedModel, FOCUS_POLL_MS)
     const stopFocusWatch =
       typeof FOCUS_ATOM.listen === 'function' ? FOCUS_ATOM.listen(() => void pollFocusedModel()) : null
+    // activeSessionId is the fallback session when no focused id is published.
+    // It needs its own immediate repoll: listening only to the focus atom leaves
+    // an active-only change waiting for the next ten-second tick (and the chip
+    // neutral or stale meanwhile). When a focused id exists it wins, so an
+    // active-only update behind it does not need another gateway request.
+    const stopActiveWatch =
+      typeof ACTIVE_ATOM.listen === 'function'
+        ? ACTIVE_ATOM.listen(() => {
+            try {
+              if (!FOCUS_ATOM.get()) void pollFocusedModel()
+            } catch (e) {
+              void pollFocusedModel()
+            }
+          })
+        : null
 
     const tickTimer = setInterval(() => {
       const next = snapshot(Date.now())
@@ -278,6 +293,7 @@ export default {
       clearInterval(pollTimer)
       clearInterval(tickTimer)
       if (typeof stopFocusWatch === 'function') stopFocusWatch()
+      if (typeof stopActiveWatch === 'function') stopActiveWatch()
     }
     if (typeof ctx.onDispose === 'function') ctx.onDispose(dispose)
 
