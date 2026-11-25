@@ -68,6 +68,21 @@ if ($Only) {
     $pluginIds = @($Only)
 }
 
+# The destination belongs to the app, never to this checkout. If they are the
+# same directory, token substitution would rewrite the source plugin itself and
+# destroy the placeholder every later deploy depends on. Compare full file
+# paths case-insensitively because this script targets Windows.
+foreach ($id in $pluginIds) {
+    $src = Join-Path $repoRoot "desktop-plugins\$id\plugin.js"
+    $dest = Join-Path (Join-Path $AppDir $id) 'plugin.js'
+    if ([System.IO.File]::Exists($src) -and
+        [System.IO.Path]::GetFullPath($src).Equals([System.IO.Path]::GetFullPath($dest), [System.StringComparison]::OrdinalIgnoreCase)) {
+        Write-Host "error: -AppDir resolves to this clone's desktop-plugins folder; deploying would rewrite the plugin source $src"
+        Write-Host '       pass the app plugin folder, e.g. -AppDir C:\Users\you\AppData\Local\hermes\desktop-plugins'
+        exit 1
+    }
+}
+
 # UTF-8 without a BOM: the app reads the file as plain JS.
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $failed = $false
