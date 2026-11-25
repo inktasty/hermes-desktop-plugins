@@ -903,6 +903,52 @@ async function testSessionUsage() {
     console.log('    stats fallback ' + mode + ': checked')
   }
 
+  console.log('--- session-usage overlapping polls')
+  {
+    const { mod: raceMod } = await loadPlugin('session-usage', { fresh: 'usage-race', scriptsDir: '/tmp/hdp-test/scripts' })
+    const pendingUsage = []
+    sdk.host.state.focusedSessionId.set('sess-usage-race')
+    sdk.host.state.focusedUsage.set(null)
+    // Let the already-armed deepseek-rate focus watcher answer and settle BEFORE
+    // the pending-RPC fixture installs, so its request cannot share the queue.
+    await settle(12)
+    sdk.setRpc(async (method, params) => {
+      if (method === 'session.stats') throw Object.assign(new Error('unknown method'), { code: -32601 })
+      if (method === 'session.usage') return new Promise(resolve => pendingUsage.push({ sid: params && params.session_id, resolve }))
+      if (method === 'shell.exec') return { stdout: priceLine + '\n', stderr: '', code: 0 }
+      return {}
+    })
+    const { ctx: raceCtx, contributions: raceContrib } = captureCtx()
+    stubTimers()
+    raceMod.register(raceCtx)
+    const racePoll = timers.find(t => t.ms === 120000).fn
+    restoreTimers()
+    await settle(12)
+    void racePoll()
+    await settle(12)
+    const raceReplies = () => pendingUsage.filter(p => p.sid === 'sess-usage-race')
+    check('overlapping session poll test starts two usage requests', raceReplies().length >= 2, JSON.stringify(pendingUsage.map(p => p.sid)))
+    const newer = {
+      ...USAGE,
+      model: 'synthetic-new-model', input: 190000, prompt: 190000, output: 10000, total: 200000,
+      cache_hit_pct: 80, dev_credits_spent_micros: 5000000
+    }
+    const older = {
+      ...USAGE,
+      model: 'synthetic-old-model', input: 90000, prompt: 90000, output: 4000, total: 94000,
+      cache_hit_pct: 20, dev_credits_spent_micros: 1000000
+    }
+    raceReplies()[1].resolve(newer)
+    await settle(12)
+    check('overlapping session poll renders the newer reply', render(raceContrib[0].render).text.includes('$5.00'), render(raceContrib[0].render).text)
+    raceReplies()[0].resolve(older)
+    await settle(12)
+    const raceOut = render(raceContrib[0].render)
+    check('stale session reply cannot overwrite newer polled state',
+      raceOut.text.includes('$5.00') && raceOut.text.includes('synthetic-new-model') && !raceOut.text.includes('synthetic-old-model'),
+      raceOut.text)
+  }
+
   // Baseline case with default Linux-style python3 success
   sdk.setRpc(async (method, params) => {
     if (method === 'session.usage') return USAGE
