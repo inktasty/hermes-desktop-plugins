@@ -22,6 +22,7 @@ import { jsx } from 'react/jsx-runtime'
 
 const ID = 'session-usage'
 const POLL_MS = 120000 // light poll; most updates arrive via the live stream
+const PRICE_CACHE_MS = 6 * 3600000 // prices can change while the desktop app stays open
 // `install.sh` sets the SCRIPTS_DIR constant below to this gateway's scripts path.
 const SCRIPT_NAME = 'model_price_lookup.py'
 const SCRIPTS_DIR = '__HERMES_SCRIPTS__'
@@ -521,7 +522,11 @@ export default {
       const want = String(model || '').trim()
       const providerId = String(provider || '').trim()
       const key = ratesKey(want, providerId)
-      if (ratesData.get()[key]?.rates) return Promise.resolve()
+      const cached = ratesData.get()[key]
+      // A desktop app can stay open for days. A successful lookup is not a
+      // permanent fact: refresh it on the poll cadence once it ages out, while
+      // still showing the last card until the replacement lookup lands.
+      if (cached?.rates && Number.isFinite(cached.at) && Date.now() - cached.at < PRICE_CACHE_MS) return Promise.resolve()
       if (pendingRates.has(key)) return pendingRates.get(key)
       const pending = (async () => {
         try {
@@ -530,7 +535,7 @@ export default {
             const message = typeof parsed.error === 'string' && parsed.error.replace(/\s+/g, ' ').trim()
             throw new Error(message || 'Pricing lookup failed')
           }
-          ratesData.set({ ...ratesData.get(), [key]: { rates: parsed, error: null } })
+          ratesData.set({ ...ratesData.get(), [key]: { rates: parsed, error: null, at: Date.now() } })
         } catch (e) {
           ratesData.set({ ...ratesData.get(), [key]: { rates: null, error: e && e.message ? e.message : String(e) } })
         } finally {
