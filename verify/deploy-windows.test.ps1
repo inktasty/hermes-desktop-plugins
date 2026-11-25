@@ -80,6 +80,26 @@ try {
     Assert (-not (Test-Path -LiteralPath $missing)) 'Missing scripts path wrote files'
     Write-Host 'PASS: missing -ScriptsDir with HERMES_HOME unset exits 1'
 
+    $relative = Join-Path $root 'relative'
+    $output = Deploy @('-AppDir', $relative, '-ScriptsDir', 'scripts') 1
+    Assert ($output -match 'must be absolute on the gateway') 'Relative -ScriptsDir did not name the absolute-path requirement'
+    Assert (-not (Test-Path -LiteralPath $relative)) 'Relative -ScriptsDir wrote files'
+    Write-Host 'PASS: relative -ScriptsDir exits 1 before writing'
+
+    $env:HERMES_HOME = 'relative-gateway-home'
+    $derivedRelative = Join-Path $root 'derived-relative'
+    $null = Deploy @('-AppDir', $derivedRelative) 1
+    Assert (-not (Test-Path -LiteralPath $derivedRelative)) 'Relative HERMES_HOME wrote files'
+    $env:HERMES_HOME = $null
+    Write-Host 'PASS: relative HERMES_HOME fallback exits 1 before writing'
+
+    $uncApp = Join-Path $root 'unc'
+    $uncScripts = '\\server\share\scripts'
+    $uncLiteral = '\\\\server\\share\\scripts'
+    $null = Deploy @('-AppDir', $uncApp, '-ScriptsDir', $uncScripts)
+    Check-Files $uncApp $ids $uncLiteral
+    Write-Host 'PASS: backslash UNC ScriptsDir stays accepted and escaped'
+
     $env:HERMES_HOME = Join-Path $root 'gateway'
     $fallback = Join-Path $root 'fallback'
     $null = Deploy @('-AppDir', $fallback)
