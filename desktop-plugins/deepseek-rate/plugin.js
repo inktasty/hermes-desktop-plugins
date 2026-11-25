@@ -147,6 +147,7 @@ function focusedSid() {
 }
 
 let pollFailures = 0
+let modelGeneration = 0
 
 // Current gateways answer `session.stats` and reject the legacy
 // `session.usage` (-32601); older ones only have `session.usage`. Try stats
@@ -169,16 +170,20 @@ async function requestModel(sid) {
 async function pollFocusedModel() {
   const sid = focusedSid()
   if (!sid) return
+  const generation = ++modelGeneration
   try {
     const resp = await requestModel(sid)
+    // Focus moving starts another poll. Only that newest request may write:
+    // a slower older reply otherwise repaints the chip with the model it
+    // overtook until the next interval. A stale failure is not a current
+    // failure either, so the generation check spans both paths.
+    if (focusedSid() !== sid || generation !== modelGeneration) return
     pollFailures = 0
     const model = resp && typeof resp.model === 'string' ? resp.model : ''
-    // Focus moved while the request was in flight: the reply describes a
-    // session the user has left, so it may not paint the chip.
-    if (focusedSid() !== sid) return
     if ($sessModelFor.get() !== sid) $sessModelFor.set(sid)
     if ($sessModel.get() !== model) $sessModel.set(model)
   } catch (e) {
+    if (generation !== modelGeneration) return
     pollFailures += 1
     // One line per failure streak: a broken link shows up in the app log
     // without a 10s heartbeat filling it.

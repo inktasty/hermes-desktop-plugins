@@ -4,14 +4,16 @@ $deploy = Join-Path $repoRoot 'deploy-windows.ps1'
 $engine = (Get-Process -Id $PID).Path
 $root = Join-Path ([IO.Path]::GetTempPath()) ('hermes-deploy-test-' + [guid]::NewGuid())
 $savedHome = $env:HERMES_HOME
+$savedLocalAppData = $env:LOCALAPPDATA
+$savedUserProfile = $env:USERPROFILE
 $ids = @('deepseek-rate', 'opencode-usage', 'session-usage')
 
 function Assert($Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
 
-function Deploy([string[]]$DeployArgs, [int]$ExpectedExit = 0) {
-    $output = & $engine -NoProfile -File $deploy @DeployArgs 2>&1
+function Deploy([string[]]$DeployArgs, [int]$ExpectedExit = 0, [string]$Script = $deploy) {
+    $output = & $engine -NoProfile -File $Script @DeployArgs 2>&1
     Assert ($LASTEXITCODE -eq $ExpectedExit) "Expected exit $ExpectedExit, got ${LASTEXITCODE}: $output"
     return ($output -join "`n")
 }
@@ -75,10 +77,88 @@ try {
     Assert (-not (Test-Path -LiteralPath $invalid)) 'Unknown -Only wrote files'
     Write-Host 'PASS: unknown -Only exits 1'
 
+    $mirror = Join-Path $root 'source-checkout'
+    $mirrorDeploy = Join-Path $mirror 'deploy-windows.ps1'
+    $mirrorPlugins = Join-Path $mirror 'desktop-plugins'
+    [IO.Directory]::CreateDirectory($mirror) | Out-Null
+    Copy-Item -LiteralPath $deploy -Destination $mirrorDeploy
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'desktop-plugins') -Destination $mirrorPlugins -Recurse
+    $sourceHashes = @{}
+    foreach ($id in $ids) {
+        $sourcePath = Join-Path (Join-Path $mirrorPlugins $id) 'plugin.js'
+        $sourceHashes[$id] = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourcePath).Hash
+    }
+    $output = Deploy @('-AppDir', $mirrorPlugins, '-ScriptsDir', $scripts) 1 $mirrorDeploy
+    Assert ($output -match 'rewrite the plugin source') 'Same-path deploy did not name the source overwrite'
+    foreach ($id in $ids) {
+        $sourcePath = Join-Path (Join-Path $mirrorPlugins $id) 'plugin.js'
+        Assert ((Get-FileHash -Algorithm SHA256 -LiteralPath $sourcePath).Hash -eq $sourceHashes[$id]) "Same-path deploy rewrote $id"
+    }
+    Write-Host 'PASS: AppDir equal to the source checkout is refused without rewriting it'
+
     $missing = Join-Path $root 'missing'
     $null = Deploy @('-AppDir', $missing) 1
     Assert (-not (Test-Path -LiteralPath $missing)) 'Missing scripts path wrote files'
     Write-Host 'PASS: missing -ScriptsDir with HERMES_HOME unset exits 1'
+
+    $relative = Join-Path $root 'relative'
+    $output = Deploy @('-AppDir', $relative, '-ScriptsDir', 'scripts') 1
+    Assert ($output -match 'must be absolute on the gateway') 'Relative -ScriptsDir did not name the absolute-path requirement'
+    Assert (-not (Test-Path -LiteralPath $relative)) 'Relative -ScriptsDir wrote files'
+    Write-Host 'PASS: relative -ScriptsDir exits 1 before writing'
+
+    $env:HERMES_HOME = 'relative-gateway-home'
+    $derivedRelative = Join-Path $root 'derived-relative'
+    $null = Deploy @('-AppDir', $derivedRelative) 1
+    Assert (-not (Test-Path -LiteralPath $derivedRelative)) 'Relative HERMES_HOME wrote files'
+    $env:HERMES_HOME = $null
+    Write-Host 'PASS: relative HERMES_HOME fallback exits 1 before writing'
+
+    $uncApp = Join-Path $root 'unc'
+    $uncScripts = '\\server\share\scripts'
+    $uncLiteral = '\\\\server\\share\\scripts'
+    $null = Deploy @('-AppDir', $uncApp, '-ScriptsDir', $uncScripts)
+    Check-Files $uncApp $ids $uncLiteral
+    Write-Host 'PASS: backslash UNC ScriptsDir stays accepted and escaped'
+
+    foreach ($localValue in @($null, '   ')) {
+        $case = if ($null -eq $localValue) { 'unset' } else { 'blank' }
+        $user = Join-Path $root ('user-' + $case)
+        [IO.Directory]::CreateDirectory($user) | Out-Null
+        $env:USERPROFILE = $user
+        $env:LOCALAPPDATA = $localValue
+        $expectedApp = Join-Path (Join-Path (Join-Path (Join-Path $user 'AppData') 'Local') 'hermes') 'desktop-plugins'
+        $null = Deploy @('-ScriptsDir', $scripts)
+        Check-Files $expectedApp $ids $literal
+    }
+    Write-Host 'PASS: missing or blank LOCALAPPDATA falls back to <home>\AppData\Local\hermes'
+
+    $legacyUser = Join-Path $root 'user-legacy'
+    $legacyHome = Join-Path $legacyUser '.hermes'
+    $freshLocalAppData = Join-Path $root 'fresh-localappdata'
+    [IO.Directory]::CreateDirectory($legacyHome) | Out-Null
+    $env:USERPROFILE = $legacyUser
+    $env:LOCALAPPDATA = $freshLocalAppData
+    $null = Deploy @('-ScriptsDir', $scripts)
+    Check-Files (Join-Path $legacyHome 'desktop-plugins') $ids $literal
+    Assert (-not (Test-Path -LiteralPath (Join-Path $freshLocalAppData 'hermes'))) 'Legacy-home deploy created the new default home'
+    Write-Host 'PASS: legacy Windows home wins while the new default home does not exist'
+
+    $bothUser = Join-Path $root 'user-both'
+    $bothLegacyHome = Join-Path $bothUser '.hermes'
+    $bothLocalAppData = Join-Path $root 'existing-localappdata'
+    $bothDefaultHome = Join-Path $bothLocalAppData 'hermes'
+    [IO.Directory]::CreateDirectory($bothLegacyHome) | Out-Null
+    [IO.Directory]::CreateDirectory($bothDefaultHome) | Out-Null
+    $env:USERPROFILE = $bothUser
+    $env:LOCALAPPDATA = $bothLocalAppData
+    $null = Deploy @('-ScriptsDir', $scripts)
+    Check-Files (Join-Path $bothDefaultHome 'desktop-plugins') $ids $literal
+    Assert (-not (Test-Path -LiteralPath (Join-Path $bothLegacyHome 'desktop-plugins'))) 'Default-home deploy wrote to the legacy home too'
+    Write-Host 'PASS: new default home wins once it exists'
+
+    $env:LOCALAPPDATA = $savedLocalAppData
+    $env:USERPROFILE = $savedUserProfile
 
     $env:HERMES_HOME = Join-Path $root 'gateway'
     $fallback = Join-Path $root 'fallback'
@@ -102,5 +182,7 @@ try {
     Write-Host "PASS: deployment checks complete (PowerShell $($PSVersionTable.PSVersion))"
 } finally {
     $env:HERMES_HOME = $savedHome
+    $env:LOCALAPPDATA = $savedLocalAppData
+    $env:USERPROFILE = $savedUserProfile
     if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
 }

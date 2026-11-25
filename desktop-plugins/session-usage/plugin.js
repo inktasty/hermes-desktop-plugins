@@ -22,6 +22,7 @@ import { jsx } from 'react/jsx-runtime'
 
 const ID = 'session-usage'
 const POLL_MS = 120000 // light poll; most updates arrive via the live stream
+const PRICE_CACHE_MS = 6 * 3600000 // prices can change while the desktop app stays open
 // `install.sh` sets the SCRIPTS_DIR constant below to this gateway's scripts path.
 const SCRIPT_NAME = 'model_price_lookup.py'
 const SCRIPTS_DIR = '__HERMES_SCRIPTS__'
@@ -471,6 +472,7 @@ export default {
     const pendingRates = new Map()
     const costData = atom({})   // { [sid]: { usd, peak, provider, model, ... } } estimated spend
     let usageMethod = null
+    let usageGeneration = 0
 
     // Rates are per 1M tokens, read from the gateway's model registry cache
     // (Hermes's own estimator cannot price providers like opencode-go).
@@ -520,7 +522,11 @@ export default {
       const want = String(model || '').trim()
       const providerId = String(provider || '').trim()
       const key = ratesKey(want, providerId)
-      if (ratesData.get()[key]?.rates) return Promise.resolve()
+      const cached = ratesData.get()[key]
+      // A desktop app can stay open for days. A successful lookup is not a
+      // permanent fact: refresh it on the poll cadence once it ages out, while
+      // still showing the last card until the replacement lookup lands.
+      if (cached?.rates && Number.isFinite(cached.at) && Date.now() - cached.at < PRICE_CACHE_MS) return Promise.resolve()
       if (pendingRates.has(key)) return pendingRates.get(key)
       const pending = (async () => {
         try {
@@ -529,7 +535,7 @@ export default {
             const message = typeof parsed.error === 'string' && parsed.error.replace(/\s+/g, ' ').trim()
             throw new Error(message || 'Pricing lookup failed')
           }
-          ratesData.set({ ...ratesData.get(), [key]: { rates: parsed, error: null } })
+          ratesData.set({ ...ratesData.get(), [key]: { rates: parsed, error: null, at: Date.now() } })
         } catch (e) {
           ratesData.set({ ...ratesData.get(), [key]: { rates: null, error: e && e.message ? e.message : String(e) } })
         } finally {
@@ -555,6 +561,7 @@ export default {
     async function fetchOnce() {
       const sid = focusedSid()
       if (!sid) return
+      const generation = ++usageGeneration
       try {
         let resp
         if (usageMethod === 'session.usage') {
@@ -569,6 +576,11 @@ export default {
           }
         }
         if (resp && typeof resp === 'object') {
+          // A click, focus effect and poll can overlap. Only the newest request
+          // may write: an older reply otherwise reverts fields mergeUsage cannot
+          // order (model, cache ratio, billed spend), and its late trackCost can
+          // mistake the newer counter baseline for a reset and charge it again.
+          if (generation !== usageGeneration) return
           delete resp.credits_lines // nous-balance owns credits display
           const curMap = sessData.get()
           const prev = curMap[sid] || null
@@ -581,6 +593,7 @@ export default {
           // cached, so pricing first would charge this session's opening
           // sample to the previously loaded model's rates.
           if (merged.model) await loadRates(merged.model, merged.provider)
+          if (generation !== usageGeneration) return
           trackCost(sid, merged)
         }
       } catch (e) {
