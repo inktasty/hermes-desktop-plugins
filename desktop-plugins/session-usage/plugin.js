@@ -471,6 +471,7 @@ export default {
     const pendingRates = new Map()
     const costData = atom({})   // { [sid]: { usd, peak, provider, model, ... } } estimated spend
     let usageMethod = null
+    let usageGeneration = 0
 
     // Rates are per 1M tokens, read from the gateway's model registry cache
     // (Hermes's own estimator cannot price providers like opencode-go).
@@ -555,6 +556,7 @@ export default {
     async function fetchOnce() {
       const sid = focusedSid()
       if (!sid) return
+      const generation = ++usageGeneration
       try {
         let resp
         if (usageMethod === 'session.usage') {
@@ -569,6 +571,11 @@ export default {
           }
         }
         if (resp && typeof resp === 'object') {
+          // A click, focus effect and poll can overlap. Only the newest request
+          // may write: an older reply otherwise reverts fields mergeUsage cannot
+          // order (model, cache ratio, billed spend), and its late trackCost can
+          // mistake the newer counter baseline for a reset and charge it again.
+          if (generation !== usageGeneration) return
           delete resp.credits_lines // nous-balance owns credits display
           const curMap = sessData.get()
           const prev = curMap[sid] || null
@@ -581,6 +588,7 @@ export default {
           // cached, so pricing first would charge this session's opening
           // sample to the previously loaded model's rates.
           if (merged.model) await loadRates(merged.model, merged.provider)
+          if (generation !== usageGeneration) return
           trackCost(sid, merged)
         }
       } catch (e) {
